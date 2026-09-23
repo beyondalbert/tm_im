@@ -1,0 +1,56 @@
+# ---------- 凭据与本地配置（绝不提交） ----------
+deploy/conf/sharding.yaml
+deploy/conf/application-external.yml
+deploy/conf/application-local.yml
+*.env
+.env
+*.pem
+*.key
+
+# ---------- Java / Maven ----------
+target/
+!.mvn/wrapper/maven-wrapper.jar
+*.class
+*.jar
+*.war
+!maven-wrapper.jar
+
+# ---------- 前端 ----------
+node_modules/
+dist/
+.vite/
+*.tsbuildinfo
+npm-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+
+# ---------- Python ----------
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+*.egg-info/
+.pytest_cache/
+
+# ---------- IDE ----------
+.idea/
+.vscode/
+*.iml
+*.ipr
+*.iws
+.settings/
+.project
+.classpath
+
+# ---------- OS ----------
+Thumbs.db
+Desktop.ini
+.DS_Store
+
+# ---------- 运行期数据 ----------
+data/
+logs/
+*.log
+
+# ---------- 本地工具链（protoc 等，按需重新下载）----------
+.tools/

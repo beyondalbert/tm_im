@@ -1,0 +1,172 @@
+// ============================================================
+// tm_im 长连接协议定义
+// ------------------------------------------------------------
+// 用途：任何语言都可直接用本文件生成代码接入，无需依赖官方 SDK
+//
+// 编译示例：
+//   protoc --java_out=./out                 proto/transport.proto
+//   protoc --python_out=./out               proto/transport.proto
+//   protoc --go_out=./out --go_opt=paths=source_relative proto/transport.proto
+//   protoc --ts_out=./out                   proto/transport.proto
+//
+// 传输载体：
+//   WebSocket : 一个 WS 二进制消息 = 一个完整 Frame（无需额外长度前缀）
+//   原生 TCP  : 4 字节大端长度前缀 + Frame 字节流
+// ============================================================
+
+syntax = "proto3";
+
+package tm.im.transport;
+
+option java_package        = "com.tm.im.proto.transport";
+option java_multiple_files = true;
+option java_outer_classname = "TransportProto";
+
+// ------------------------------------------------------------
+// 顶层帧：所有通信的最小单元
+// ------------------------------------------------------------
+message Frame {
+  Cmd    cmd     = 1;  // 命令字，决定 payload 的具体类型
+  uint64 req_id  = 2;  // 请求序号（客户端自增），用于请求-响应关联；服务端主动推送时为 0
+  bytes  payload = 3;  // 按 cmd 对应的消息序列化后的字节
+
+  enum Cmd {
+    // ---- 握手与保活 ----
+    CMD_UNKNOWN = 0;
+    CMD_AUTH    = 1;   // C→S  鉴权请求          payload = AuthRequest
+    CMD_AUTH_OK = 2;   // S→C  鉴权成功          payload = AuthResponse
+    CMD_PING    = 3;   // 双向 心跳              payload = 空
+    CMD_PONG    = 4;   // 双向 心跳应答          payload = 空
+
+    // ---- 消息 ----
+    CMD_SEND     = 10; // C→S  发送消息          payload = SendRequest
+    CMD_SEND_ACK = 11; // S→C  发送成功回执      payload = SendAck
+    CMD_PUSH     = 12; // S→C  新消息推送        payload = PushMessage
+    CMD_READ     = 13; // C→S  已读上报          payload = ReadRequest
+    CMD_SYNC     = 14; // C→S  断点续传拉取      payload = SyncRequest
+    CMD_SYNC_END = 15; // S→C  续传结束标记      payload = SyncEnd
+
+    // ---- 控制 ----
+    CMD_KICK  = 20;    // S→C  强制下线          payload = KickNotice
+    CMD_ERROR = 21;    // S→C  错误（对应 req_id）payload = ErrorFrame
+  }
+}
+
+// ------------------------------------------------------------
+// 枚举：线上以数字为准，名称仅供可读性
+// ------------------------------------------------------------
+enum ActorType {
+  ACTOR_TYPE_UNKNOWN = 0;
+  ACTOR_TYPE_HUMAN   = 1;  // 人类
+  ACTOR_TYPE_AGENT   = 2;  // Agent（与人同权）
+}
+
+enum MsgType {
+  MSG_TYPE_UNKNOWN = 0;
+  MSG_TYPE_TEXT    = 1;
+  MSG_TYPE_IMAGE   = 2;
+  MSG_TYPE_SYSTEM  = 3;
+}
+
+enum KickReason {
+  KICK_REASON_UNKNOWN        = 0;
+  KICK_REASON_OTHER_DEVICE   = 1;  // 其他端登录顶号
+  KICK_REASON_SUSPENDED      = 2;  // 账号被停用
+  KICK_REASON_SERVER_RESTART = 3;  // 服务重启，请重连
+  KICK_REASON_AUTH_EXPIRED   = 4;  // 凭据过期，需重新认证
+}
+
+// ------------------------------------------------------------
+// 握手与鉴权
+// ------------------------------------------------------------
+message AuthRequest {
+  string token          = 1;  // HUMAN: JWT；AGENT: api_key
+  string client_version = 2;  // 可选，便于服务端做兼容
+  string device_id      = 3;  // 可选，同一 Actor 多端标识
+}
+
+message AuthResponse {
+  uint64    actor_id      = 1;
+  string    handle        = 2;
+  ActorType actor_type    = 3;
+  uint32    heartbeat_sec = 4;  // 服务端建议的心跳间隔（秒）
+}
+
+// ------------------------------------------------------------
+// 消息体
+// ------------------------------------------------------------
+message Message {
+  uint64  message_id    = 1;  // 全局唯一（Snowflake）
+  uint64  conv_id       = 2;  // 会话 ID
+  uint64  seq           = 3;  // 会话内严格递增序号（排序/去重/续传的唯一依据）
+  uint64  sender_id     = 4;  // 发送者 Actor ID
+  MsgType msg_type      = 5;
+  string  content_json  = 6;  // 内容以 JSON 字符串承载，便于跨语言与版本演进
+  uint64  reply_to      = 7;  // 引用的 message_id，0 表示未引用
+  int64   created_at_ms = 8;  // Unix 毫秒时间戳（仅供展示，排序请用 seq）
+}
+
+message SendRequest {
+  uint64  conv_id       = 1;
+  string  client_msg_id = 2;  // 幂等键：同一客户端重复提交同值只会落一条
+  MsgType msg_type      = 3;
+  string  content_json  = 4;
+  uint64  reply_to      = 5;
+}
+
+message SendAck {
+  uint64 conv_id       = 1;
+  uint64 seq           = 2;   // 服务端分配的最终序号（客户端应以它为准）
+  uint64 message_id    = 3;
+  int64  created_at_ms = 4;
+  string client_msg_id = 5;   // 原样回传，便于客户端配对
+}
+
+message PushMessage {
+  Message message = 1;
+}
+
+message ReadRequest {
+  uint64 conv_id       = 1;
+  uint64 last_read_seq = 2;  // 已读游标
+}
+
+// ------------------------------------------------------------
+// 断点续传：重连后按会话逐个补齐丢失的 seq
+// ------------------------------------------------------------
+message ConvCursor {
+  uint64 conv_id   = 1;
+  uint64 since_seq = 2;  // 从「该 seq 之后」开始拉取（不含该 seq）
+}
+
+message SyncRequest {
+  repeated ConvCursor cursors = 1;
+  uint32 limit                = 2;  // 单会话单次返回上限，0 用服务端默认
+}
+
+message SyncResponse {
+  repeated Message messages = 1;  // 按 (conv_id, seq) 升序
+  bool has_more             = 2;  // 为 true 时客户端应继续发送 SyncRequest
+  bool truncated            = 3;  // 为 true 表示服务端截断（如超保留期），需走 REST 补拉
+}
+
+message SyncEnd {
+  bool   ok             = 1;
+  string message        = 2;
+  uint32 conv_synced    = 3;  // 实际完成的会话数
+}
+
+// ------------------------------------------------------------
+// 控制与错误
+// ------------------------------------------------------------
+message KickNotice {
+  KickReason reason     = 1;
+  string     detail     = 2;  // 人类可读的说明
+  uint32     retry_after_ms = 3;  // 建议重连等待（毫秒），0 表示立即
+}
+
+message ErrorFrame {
+  uint32 code      = 1;  // 见接入文档的错误码表
+  string message   = 2;  // 人类可读
+  bool   retryable = 3;  // 是否可安全重试（幂等前提下）
+}

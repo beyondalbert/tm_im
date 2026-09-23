@@ -1,0 +1,60 @@
+# ============================================================
+# tm_im ShardingSphere-JDBC 分片配置（模板）
+# ------------------------------------------------------------
+# 用法：复制为 sharding.yaml 并填入真实连接信息（勿提交仓库）
+#
+# 启动参数二选一：
+#   开发： -Dsharding.url=jdbc:shardingsphere:classpath:sharding.yaml
+#   生产： -Dsharding.url=jdbc:shardingsphere:absolutepath:/etc/tm/sharding.yaml
+#
+# 注意：absolutepath 模式需要额外依赖
+#   org.apache.shardingsphere:shardingsphere-infra-url-absolutepath:5.5.3
+# （shardingsphere-jdbc 自带 classpath 加载器，但不含 absolutepath）
+# ============================================================
+
+dataSources:
+  ds_0:
+    dataSourceClassName: com.zaxxer.hikari.HikariDataSource
+    driverClassName: com.mysql.cj.jdbc.Driver
+    # TODO 填入你的 MySQL 连接信息
+    jdbcUrl: jdbc:mysql://MYSQL_HOST:MYSQL_PORT/tm_im?useSSL=false&serverTimezone=Asia/Shanghai&characterEncoding=utf8&allowPublicKeyRetrieval=true&rewriteBatchedStatements=true
+    username: MYSQL_USER
+    password: MYSQL_PASSWORD
+    # 连接池：按外部 MySQL 规格调整（勿盲目放大）
+    maximumPoolSize: 50
+    minimumIdle: 10
+    connectionTimeout: 30000
+    idleTimeout: 600000
+    maxLifetime: 1800000
+    connectionTestQuery: SELECT 1
+
+rules:
+  # ---------------- 分片规则 ----------------
+  # 已反编译核实：5.5.3 的键名是 actualDataNodes（不是 dataNodes）
+  - !SHARDING
+    tables:
+      message:
+        # 起步：1 库 × 16 表（仅分表）
+        # 扩容：改为 ds_${0..3}.message_${0..15} 并迁移数据
+        actualDataNodes: ds_0.message_${0..15}
+        tableStrategy:
+          standard:
+            shardingColumn: conv_id
+            shardingAlgorithmName: message_inline
+    shardingAlgorithms:
+      message_inline:
+        type: INLINE
+        props:
+          # 分片数必须与 actualDataNodes 的 ${0..15} 一致
+          algorithm-expression: message_${conv_id % 16}
+    # 本表主键由应用层 Snowflake 生成，故不配置 keyGenerators
+
+  # ---------------- 单表规则 ----------------
+  # actor / actor_secret / agent_profile / conversation / conversation_member
+  # friendship / post / feed_item / media 均为非分片表
+  # 单数据源时可省略；拆多库后必须指定 defaultDataSource
+  - !SINGLE
+    defaultDataSource: ds_0
+
+props:
+  sql-show: false   # 调试路由时改 true

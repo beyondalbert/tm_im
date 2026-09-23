@@ -1,0 +1,135 @@
+# ============================================================
+# tm_im 外部服务配置（模板）
+# ------------------------------------------------------------
+# 复制为 application-external.yml 并填入/导出真实值（勿提交仓库）
+#
+# 启动：
+#   java -jar tm-app.jar \
+#     --spring.config.additional-location=file:/etc/tm/ \
+#     --sharding.url=jdbc:shardingsphere:absolutepath:/etc/tm/sharding.yaml
+#
+# 所有敏感值走环境变量，本文件只留占位符。
+# ============================================================
+
+spring:
+  # ---------- 数据源：交给 ShardingSphere 驱动接管 ----------
+  # 关键：driver-class-name 必须是 ShardingSphereDriver，而非 mysql 驱动
+  datasource:
+    driver-class-name: org.apache.shardingsphere.driver.ShardingSphereDriver
+    url: jdbc:shardingsphere:absolutepath:${TM_SHARDING_CONF:/etc/tm/sharding.yaml}
+
+  # ---------- Redis（外部提供） ----------
+  data:
+    redis:
+      host: ${TM_REDIS_HOST}
+      port: ${TM_REDIS_PORT:6379}
+      password: ${TM_REDIS_PASSWORD:}
+      database: ${TM_REDIS_DB:0}
+      timeout: 3000ms
+      connect-timeout: 3000ms
+      lettuce:
+        pool:
+          max-active: 32
+          max-idle: 16
+          min-idle: 4
+          max-wait: 2000ms
+        shutdown-timeout: 200ms
+
+  # ---------- 文件上传（图片） ----------
+  servlet:
+    multipart:
+      max-file-size: 10MB
+      max-request-size: 12MB
+
+server:
+  port: ${TM_HTTP_PORT:8080}
+  tomcat:
+    threads:
+      max: 400
+      min-spare: 40
+    max-connections: 10000
+
+# ============================================================
+# tm_im 自身配置
+# ============================================================
+tm:
+  # ---------- Netty 长连接 ----------
+  netty:
+    enabled: true
+    port: ${TM_NETTY_PORT:8090}
+    boss-threads: 1
+    worker-threads: 0          # 0 = CPU 核数 × 2
+    business-threads: 32       # 业务线程池（绝不在 IO 线程做 DB）
+    business-queue-capacity: 20000
+    # 心跳：读空闲 30s 发 ping；60s 未响应告警；90s 断开
+    heartbeat-idle-seconds: 30
+    heartbeat-timeout-seconds: 90
+    # 写缓冲水位（背压控制，超过高水位则丢弃非关键帧）
+    write-buffer-high-water-mark: 65536
+    write-buffer-low-water-mark: 32768
+    # 单连接每秒最大帧数（防刷）
+    max-frames-per-second: 200
+    max-connections: 200000
+
+  # ---------- 媒体（图片）存储 ----------
+  storage:
+    # local | oss | s3
+    type: ${TM_MEDIA_TYPE:local}
+    media-root: ${TM_MEDIA_ROOT:./data/media}
+    media-public-base: ${TM_MEDIA_BASE:http://localhost:8080/v1/media}
+    # OSS/S3 预留（type 非 local 时使用）
+    endpoint: ${TM_OSS_ENDPOINT:}
+    bucket: ${TM_OSS_BUCKET:}
+    access-key: ${TM_OSS_AK:}
+    secret-key: ${TM_OSS_SK:}
+
+  # ---------- Snowflake 节点标识（多实例必须各不相同！） ----------
+  snowflake:
+    worker-id: ${TM_WORKER_ID:1}
+    datacenter-id: ${TM_DC_ID:1}
+
+  # ---------- 消息与扇出 ----------
+  message:
+    # 超过该人数转为读扩散（不再逐成员写扩散）
+    write-fanout-threshold: 500
+    # 离线消息保留天数
+    offline-retention-days: 30
+    # 单会话消息拉取上限
+    max-pull-size: 200
+
+  # ---------- Agent 风控 ----------
+  # 注：「非好友不能发消息」是硬规则（§11.6），不在此配置
+  # 这里只管速率与配额（第二道防线）
+  agent:
+    default-rate-limit-per-minute: 60
+    default-daily-quota: 5000
+    # 好友请求也限流，防 Agent 批量骚扰
+    friend-request-daily-quota: 100
+    webhook-timeout-ms: 5000
+    webhook-max-retry: 3
+    # 签名头名称
+    signature-header: X-TM-Signature
+
+  # ---------- 好友关系（单聊硬前置，§11.6） ----------
+  friend:
+    # 好友集缓存 TTL（内存，加/删好友时主动失效）
+    cache-ttl-seconds: 1800
+    # 好友请求过期天数
+    request-expire-days: 7
+    # 是否允许被拉黑者再次发起请求
+    allow-request-after-block: false
+
+  # ---------- 广场 ----------
+  feed:
+    # 好友动态加权（分数越高越靠前）
+    friend-boost: 524288
+    # 大 V 阈值：粉丝数超过则改读扩散
+    celebrity-threshold: 10000
+    page-size: 20
+
+logging:
+  level:
+    root: INFO
+    com.tm.im: ${TM_LOG_LEVEL:INFO}
+    # 调试分片路由时打开
+    org.apache.shardingsphere: INFO
