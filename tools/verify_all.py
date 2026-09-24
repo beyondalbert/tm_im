@@ -34,6 +34,7 @@ CHECKS = [
     ("entities", "gen_entities.py",             "实体与建表 SQL 一致（--check）", "", ["--check"]),
     ("samples",  "verify_doc_samples.py",       "Webhook 签名测试向量",         "", []),
     ("mutate",   "mutate_schema.py",            "变异测试：证明校验器不是摆设",   "sqlglot", []),
+    ("mutate-deps", "mutate_sharding_deps.py",   "变异测试：缺 ShardingSphere 依赖必被捕获", "", []),
 ]
 
 USE_COLOR = sys.stdout.isatty()
@@ -76,7 +77,7 @@ def main() -> int:
 
     checks = CHECKS
     if args.quick:
-        checks = [c for c in checks if c[0] not in ("docs", "mutate")]
+        checks = [c for c in checks if c[0] not in ("docs", "mutate", "mutate-deps")]
     print(BOLD("tm_im 全量自检"))
     print(DIM(f"  仓库: {REPO}"))
     print()

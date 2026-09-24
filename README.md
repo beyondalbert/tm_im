@@ -67,9 +67,14 @@ uv run --with protobuf --with pyyaml --with sqlglot python tools/verify_all.py
 | `schema` | 建表 SQL 语法 + **分片语义约束**（主键/幂等键必须含分片列） |
 | `server-sql` | 服务端核验脚本的语法与 information_schema 列引用 |
 | `docs` | 接入文档字节样本与签名向量 |
-| `yaml` | 配置模板可解析 |
+| `shard` | 分片口径三方一致（DDL ↔ 模板 ↔ 代码）+ 配置可解析 |
+| `errors` | 错误码契约：文档 §2 ↔ 枚举 |
+| `entities` | 实体类与建表 SQL 一致 |
 | `samples` | Webhook 签名测试向量 |
-| `mutate` | **变异测试**：验证校验器真的能抓到错误 |
+| `mutate` | **变异测试**：验证建表校验器真的能抓到错误 |
+| `mutate-deps` | **变异测试**：验证 ShardingSphere 依赖缺失必被守卫捕获 |
+
+`--quick` 跳过耗时的 `docs` / `mutate` / `mutate-deps`。
 
 ### 建表 SQL 为什么是生成的
 
@@ -109,6 +114,56 @@ yaml_shard_count_mismatch    已捕获   分片数不一致：yaml=8 DDL=16
 
 若变异**未生效**（目标文本没找到），脚本会直接报错而不是静默跳过——
 否则一个写错了的变异会伪装成"校验器很厉害"。
+
+### 服务端测试：单元 / 集成两层
+
+```bash
+# 单元测试：离线可跑，不需要数据库与凭据
+mvn -o test
+
+# 集成测试：需要真实 MySQL，用 -Pit 显式激活
+uv run python tools/gen_runtime_config.py
+mvn -pl tm-storage -am test -Pit "-Dtm.it.config=deploy/conf/runtime/sharding.yaml"
+```
+
+集成测试**刻意做成"缺配置就失败"**，而不是"缺配置就跳过"：
+跳过会让"没验证"与"验证通过"呈现同一个绿色。
+
+测试残留数据可按标记清理（断言失败或进程被强杀时会用到）：
+
+```bash
+uv run --with pymysql python tools/clean_it_leftovers.py          # 只统计
+uv run --with pymysql python tools/clean_it_leftovers.py --apply  # 真删
+```
+
+### SPI 守卫：为什么会有这么一个测试
+
+`ShardingSphereSpiAvailabilityTest` 在默认的 `mvn test` 里跑，不需要数据库。
+它断言 shardingsphere 运行所需的 SPI 实现在 classpath 上都存在。
+
+理由很具体：**5.5.3 的 `shardingsphere-jdbc` 只是个门面**，分片、单机模式、
+连接池元数据、SQL 方言解析器、URL 加载器全都要显式声明依赖。
+漏掉任何一个，报错都不指向缺依赖：
+
+| 漏掉的依赖 | 你看到的报错 | 像是 |
+|---|---|---|
+| `shardingsphere-sharding-core` | `Invalid tag: !SHARDING` | YAML 写错了 |
+| `shardingsphere-infra-data-source-pool-hikari` | `NullPointerException @ StorageUnit` | 框架有 bug |
+| `shardingsphere-standalone-mode-core` | `SPI-00001: ... ContextManagerBuilder with type 'null'` | 配置缺了 mode |
+| `shardingsphere-parser-sql-engine-mysql` | 找不到 `SQLParserEngine type=MySQL` | 没提"方言"二字 |
+
+这四个症状本轮**逐个真实出现过**。所以干脆直接把"SPI 有没有实现"断言出来。
+细节与完整清单见 `docs/DESIGN.md` §3.3（陷阱 3）。
+
+这个守卫本身也做变异测试，证明它不是摆设：
+
+```bash
+uv run python tools/mutate_sharding_deps.py
+```
+
+它把工程拷到临时目录，逐个删掉真实依赖并断言守卫**失败且诊断可读**，
+仓库本体全程只读（结束后核对哈希）。不直接改真 pom 是因为：
+一旦进程被强杀（超时、Ctrl+C），残缺的 pom 会比不做变异测试更糟。
 
 ### 排序规则为什么必须显式写
 

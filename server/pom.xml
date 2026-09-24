@@ -2,11 +2,15 @@
 <!--
   tm_im 聚合工程父 POM
 
-  版本策略（重要，见 docs/DESIGN.md §3.3「两处兼容性陷阱」）：
+  版本策略（重要，见 docs/DESIGN.md §3.3「兼容性陷阱」）：
     1. 继承 spring-boot-starter-parent，凡 BOM 已管理的依赖一律【不写 <version>】。
        最典型的是 Netty —— 显式写 4.2.x 会与 Spring Boot 传递来的 4.1.x 同 JVM 并存，
        症状是 NoSuchMethodError / ClassCastException，极难定位。
     2. 只有 BOM 未管理的（ShardingSphere / MyBatis-Plus / protobuf）才在下面显式声明。
+    3. 例外：当第三方库需要的版本【高于】BOM 的版本时，必须在
+       <dependencyManagement> 里显式覆盖（目前只有 commons-lang3，理由见该处注释）。
+       这类冲突不会在编译期暴露，只在运行期某个狭窄代码路径上报
+       NoClassDefFoundError。
 -->
 <project xmlns="http://maven.apache.org/POM/4.0.0"
          xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
@@ -53,6 +57,9 @@
 
     <!-- 仅 BOM 未管理的依赖在此声明版本 -->
     <shardingsphere.version>5.5.3</shardingsphere.version>
+    <!-- ShardingSphere 5.5.3 的根 pom 要求 3.18.0（Strings 类）。
+         见下面对这条 dependencyManagement 的说明。 -->
+    <commons-lang3.version>3.18.0</commons-lang3.version>
     <mybatis-plus.version>3.5.17</mybatis-plus.version>
     <protobuf.version>4.36.2</protobuf.version>
     <protobuf-maven-plugin.version>0.6.1</protobuf-maven-plugin.version>
@@ -118,6 +125,107 @@
         <artifactId>shardingsphere-infra-url-absolutepath</artifactId>
         <version>${shardingsphere.version}</version>
       </dependency>
+      <!-- ============================================================
+           分片特性模块，必需，而且必须显式声明。
+
+           5.x 的 shardingsphere-jdbc 只是一个轻量门面（facade），
+           并不自带任何特性实现——依赖树里能看到它自带 single-core
+           （所以 !SINGLE 能用），但看不到 sharding-core。
+
+           缺了它的症状很难归因：启动时报
+               Can't construct a java object for !SHARDING;
+               exception=Invalid tag: !SHARDING
+           错误信息指向 YAML 标签，像是配置写错了，
+           实际上是 SPI 没找到实现类。而 shardingsphere-sharding
+           是个 packaging=pom 的聚合模块，不声明依赖，依赖它也没用，
+           必须直指 -core。
+           ============================================================ -->
+      <dependency>
+        <groupId>org.apache.shardingsphere</groupId>
+        <artifactId>shardingsphere-sharding-core</artifactId>
+        <version>${shardingsphere.version}</version>
+      </dependency>
+      <!-- ============================================================
+           数据源连接池的元数据 SPI（含 HikariCP 依赖）。
+
+           同理于 sharding-core：shardingsphere-jdbc 不带它。
+           缺了它的报错比 !SHARDING 更难归因——栈顶是一个 NPE：
+               java.lang.NullPointerException: Cannot invoke "Object.toString()"
+               because the return value of "java.util.Map.get(Object)" is null
+                   at StorageUnit.<init>(StorageUnit.java:52)
+           看着像 ShardingSphere 自己的 bug，实质是
+           StorageUnit 里 standardProps.get("url") 为 null。
+
+           “标准属性 url” 不是直接读 props 的 url 键，而要经
+           DataSourcePoolMetaData.getPropertySynonyms() 映射，
+           Hikari 的 jdbcUrl -> url 就在这个模块里。缺了它，
+           props 只有 jdbcUrl，标准属性里就没有 url。
+           ============================================================ -->
+      <dependency>
+        <groupId>org.apache.shardingsphere</groupId>
+        <artifactId>shardingsphere-infra-data-source-pool-hikari</artifactId>
+        <version>${shardingsphere.version}</version>
+      </dependency>
+      <!-- ============================================================
+           下面四个也是“必须显式声明”的：
+           参考依据是 shardingsphere-jdbc 自己的 pom —— 它把运行
+           真正需要的模块全列在 test scope 里（memory 仓库、
+           hikari 池、sharding-core、url 加载器、authority、
+           mysql 解析器）。那些不是“测试专用”，而是“测试里才
+           需要把它们补上”，因为 test scope 不会传递给我们。
+           ============================================================ -->
+      <!-- 单机模式仓库（内存）。传递带入 standalone-mode-core，
+           后者提供 ContextManagerBuilder SPI。缺它报：
+             SPI-00001: No implementation class load from SPI
+             '...mode.manager.builder.ContextManagerBuilder' with type 'null' -->
+      <dependency>
+        <groupId>org.apache.shardingsphere</groupId>
+        <artifactId>shardingsphere-standalone-mode-repository-memory</artifactId>
+        <version>${shardingsphere.version}</version>
+      </dependency>
+      <!-- 权限实现。缺它时报找不到 AuthorityRule 相关 SPI -->
+      <dependency>
+        <groupId>org.apache.shardingsphere</groupId>
+        <artifactId>shardingsphere-authority-simple</artifactId>
+        <version>${shardingsphere.version}</version>
+      </dependency>
+      <!-- MySQL 方言的 SQL 解析引擎。缺它时只字未提“方言”，
+           报的是 SQLParserEngine SPI 找不到 type=MySQL -->
+      <dependency>
+        <groupId>org.apache.shardingsphere</groupId>
+        <artifactId>shardingsphere-parser-sql-engine-mysql</artifactId>
+        <version>${shardingsphere.version}</version>
+      </dependency>
+      <!-- classpath: 形式的 url 加载器。
+           注意：infra-url-core 只含接口，classpath 与 absolutepath
+           两个加载器都是独立模块，一个都不自带。 -->
+      <dependency>
+        <groupId>org.apache.shardingsphere</groupId>
+        <artifactId>shardingsphere-infra-url-classpath</artifactId>
+        <version>${shardingsphere.version}</version>
+      </dependency>
+      <!-- ============================================================
+           commons-lang3 必须覆盖 Spring Boot BOM 的版本。
+
+           注意：这里是“压低”而不是“提高”。Boot BOM 把 commons-lang3
+           管理在 3.17.0，而 ShardingSphere 5.5.3 的根 pom 要求 3.18.0。
+           Maven 的规则是：本 pom 自己的 dependencyManagement 优先于
+           从父 pom（spring-boot-starter-parent → spring-boot-dependencies BOM）
+           继承来的版本，所以 3.17.0 会生效，把 ShardingSphere 的需求向下覆盖。
+
+           症状是运行期而且很靠后：
+             NoClassDefFoundError: org.apache.commons.lang3.Strings
+               at SystemSchemaManager.<clinit>
+           Strings 类 3.18.0 才引入。
+
+           所以不要以为“BOM 统一版本”总是安全的——BOM 里那些版本
+           是 Boot 自己的默认值，不是与其他库的兼容性契约。
+           ============================================================ -->
+      <dependency>
+        <groupId>org.apache.commons</groupId>
+        <artifactId>commons-lang3</artifactId>
+        <version>${commons-lang3.version}</version>
+      </dependency>
       <dependency>
         <groupId>com.baomidou</groupId>
         <artifactId>mybatis-plus-annotation</artifactId>
@@ -177,8 +285,63 @@
         <configuration>
           <!-- 本机默认编码是 GBK，强制 UTF-8 避免测试里中文断言/日志花屏 -->
           <argLine>-Dfile.encoding=UTF-8 -Duser.language=zh -Duser.country=CN</argLine>
+          <!-- 默认不跑 *IT（集成测试）。它们需要真实 MySQL，
+               放进 mvn test 会让离线构建变成“有时绿有时红”。
+               但也不把它们做成“缺配置就跳过”：跳过会让“没验证”
+               和“验证通过”都是绿的。用 -Pit 显式激活，
+               此时缺配置会直接失败。 -->
         </configuration>
       </plugin>
     </plugins>
   </build>
+
+  <profiles>
+    <!-- ============================================================
+         -Pit ：跑集成测试（需真实 MySQL，会读写 tn_im 库）
+         ============================================================ -->
+    <profile>
+      <id>it</id>
+      <build>
+        <plugins>
+          <plugin>
+            <groupId>org.apache.maven.plugins</groupId>
+            <artifactId>maven-surefire-plugin</artifactId>
+            <configuration>
+              <!-- 只显式列出 includes 即可：surefire 的 includes 一旦设置
+                   就完全覆盖默认值，不必再写 excludes。 -->
+              <includes>
+                <include>**/*IT.java</include>
+              </includes>
+              <systemPropertyVariables>
+                <!-- 指向运行时 sharding.yaml；未设置时测试会失败并提示
+                     生成命令，而不是静默跳过 -->
+                <tm.it.config>${tm.it.config}</tm.it.config>
+              </systemPropertyVariables>
+            </configuration>
+          </plugin>
+        </plugins>
+      </build>
+    </profile>
+
+    <!-- 默认（无 profile）：排除集成测试，保持离线可跑 -->
+    <profile>
+      <id>default-it-off</id>
+      <activation>
+        <activeByDefault>true</activeByDefault>
+      </activation>
+      <build>
+        <plugins>
+          <plugin>
+            <groupId>org.apache.maven.plugins</groupId>
+            <artifactId>maven-surefire-plugin</artifactId>
+            <configuration>
+              <excludes>
+                <exclude>**/*IT.java</exclude>
+              </excludes>
+            </configuration>
+          </plugin>
+        </plugins>
+      </build>
+    </profile>
+  </profiles>
 </project>

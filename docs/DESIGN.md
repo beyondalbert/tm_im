@@ -6,7 +6,7 @@
 > 1. 长连接改为 **自研 Netty**（不使用 Spring WebSocket 抽象）
 > 2. 分片方案锁定 **ShardingSphere-JDBC 5.5.3**，从一开始就启用
 > 3. MySQL / Redis 由你提供**外部服务**，本机不再安装 → M0 改为"配置注入 + 连通性验证"
-> 4. 依赖版本**逐项经 Maven Central 实测核实**，并修正两处兼容性陷阱（见 §3.3）
+> 4. 依赖版本**逐项经 Maven Central 与 jar 内 SPI 实测核实**，并修正四处兼容性陷阱（见 §3.3）
 
 ---
 
@@ -96,7 +96,16 @@ Spring Boot 3.5.16  →  netty.version       4.1.135.Final
                        spring-framework    6.2.19
                        jackson-bom         2.21.4
 
-ShardingSphere-JDBC  5.5.3
+ShardingSphere-JDBC  5.5.3 —— 以下子模块均需显式声明（见陷阱 3）：
+  shardingsphere-jdbc                              门面
+  shardingsphere-sharding-core                     分片（!SHARDING / SQLRouter / INLINE）
+  shardingsphere-infra-data-source-pool-hikari      连接池元数据（jdbcUrl -> url）
+  shardingsphere-standalone-mode-repository-memory  单机模式（传递带入 standalone-mode-core）
+  shardingsphere-authority-simple                   权限
+  shardingsphere-parser-sql-engine-mysql            MySQL 方言解析器
+  shardingsphere-infra-url-classpath                classpath: 配置加载器
+  shardingsphere-infra-url-absolutepath            absolutepath: 配置加载器（生产）
+commons-lang3        3.18.0  —— 必须覆盖 Boot BOM 的 3.17.0（见陷阱 4）
 MyBatis-Plus         3.5.17  (spring-boot3-starter)
 protobuf-java        4.36.2
 protobuf-maven-plugin 0.6.1   (org.xolstice.maven.plugins)
@@ -104,7 +113,7 @@ os-maven-plugin       1.7.1
 protoc 4.36.2 windows-x86_64  ✅ 可从 Maven Central 自动下载（构建无需手工装 protoc）
 ```
 
-### 3.3 两处兼容性陷阱（重要，已修正）
+### 3.3 四处兼容性陷阱（重要，已修正）
 
 #### 陷阱 1：Netty 版本必须锁 4.1.x，不能用 4.2.x
 
@@ -143,22 +152,69 @@ spring:
 
 **这个方式反而更好**：不侵入 Spring 上下文、不劫持 `DataSource` Bean、与 MyBatis-Plus 零耦合、升级 Spring Boot 不受 Starter 停更拖累。
 
-### 3.4 ShardingSphere 配置加载方式（已反编译核实）
+#### 陷阱 3：`shardingsphere-jdbc` 是门面，特性模块一个都不带（最难归因的一个）
 
-实测 `shardingsphere-jdbc:5.5.3` 的依赖清单，含 `shardingsphere-infra-url-classpath`，**但不含 `shardingsphere-infra-url-absolutepath`**。
+5.5.3 的 `shardingsphere-jdbc` **只是一个轻量门面（facade）**：它自己只带
+`infra-url-core`、`infra-context`、`sql-parser-core`、`single-core`、`transaction`、
+`authority-core` 这些壳，**分片、单机模式、连接池、SQL 方言解析器、URL 加载器
+全部要自己显式声明**。
 
-| 加载方式 | URL 写法 | 是否开箱可用 |
+判据不用猜：`shardingsphere-jdbc` 自己的 pom 把这些模块都列在 **test scope** 里。
+那不是“测试专用”，而是“测试里才需要把它们补上”——test scope 不会传递给我们。
+
+| 缺哪个模块 | 症状（实际报错） | 为什么难归因 |
 |---|---|---|
-| classpath（打进 JAR） | `jdbc:shardingsphere:classpath:sharding.yaml` | ✅ 自带 |
-| **绝对路径（JAR 外部）** | `jdbc:shardingsphere:absolutepath:/etc/tm/sharding.yaml` | ⚠️ **需额外加依赖** |
+| `shardingsphere-sharding-core` | `Can't construct a java object for !SHARDING; exception=Invalid tag: !SHARDING` | 错误信息指向 YAML 标签，像是配置写错；实际是 SPI 找不到实现 |
+| `shardingsphere-infra-data-source-pool-hikari` | `NullPointerException: ... Map.get(Object) is null` @ `StorageUnit.<init>:52` | 看着像 ShardingSphere 自己的 bug；实际是 `standardProps.get("url")` 为 null，因为 Hikari 的 `jdbcUrl → url` 同义词映射就在这个模块里 |
+| `shardingsphere-standalone-mode-repository-memory` | `SPI-00001: No implementation class load from SPI 'ContextManagerBuilder' with type 'null'` | 报的是“找不到实现”，但没说是哪一种 mode 的实现 |
+| `shardingsphere-parser-sql-engine-mysql` | `SQLParserEngine` SPI 找不到 `type=MySQL` | 同上，信息里完全没有“方言”字眼 |
 
-既然你把 MySQL/Redis 作为**外部服务**提供，运维上更希望**配置文件在 JAR 外部可改**。故显式补上：
+注意 `shardingsphere-sharding`（不带 `-core`）是个 `packaging=pom` 的**聚合模块**，
+**不声明任何依赖**，依赖它没有用，必须直指 `-core`。
+
+#### 陷阱 4：Spring Boot BOM 会把依赖“向下覆盖”到 ShardingSphere 不满足的版本
+
+Boot BOM 管理 `commons-lang3` 为 **3.17.0**，而 ShardingSphere 5.5.3 的根 pom 要求 **3.18.0**。
+Maven 规则：**本 pom 自己的 `dependencyManagement` 优先于从父 pom 继承来的版本**，
+于是 3.17.0 生效，把 ShardingSphere 的需求向下覆盖。
+
+症状出现得很晚，而且是运行期：
+
+```
+java.lang.NoClassDefFoundError: org.apache.commons.lang3.Strings
+    at ...infra.metadata.database.schema.manager.SystemSchemaManager.<clinit>
+```
+
+（`Strings` 类 3.18.0 才引入。）
+
+**结论**：不要以为“BOM 统一版本”总是安全的。BOM 里的版本是 Boot 自己的默认值，
+**不是与其他库的兼容性契约**；对每一个 BOM 管理的依赖，第三方库声明的下限都要单独核一遍。
+本项目在父 pom 里显式覆盖：
+
+```xml
+<commons-lang3.version>3.18.0</commons-lang3.version>
+```
+
+### 3.4 ShardingSphere 配置加载方式（已实测核实）
+
+> **先前这一节写错过**：曾根据 artifact 名字判定 `shardingsphere-jdbc:5.5.3`
+> “含 `shardingsphere-infra-url-classpath`”。
+> 打开 jar 看 `META-INF/services/` 才发现：**两个加载器它一个都不带**。
+> `shardingsphere-infra-url-core` 只含接口，`classpath` 与 `absolutepath`
+> 各在自己的模块里。
+> 教训：判断“某个能力在不在”，要看 **jar 内的 SPI 文件**，不能看 artifact 名字。
+
+| 加载方式 | URL 写法 | 负责提供的模块 |
+|---|---|---|
+| classpath（打进 JAR） | `jdbc:shardingsphere:classpath:sharding.yaml` | `shardingsphere-infra-url-classpath` |
+| **绝对路径（JAR 外部）** | `jdbc:shardingsphere:absolutepath:/etc/tm/sharding.yaml` | `shardingsphere-infra-url-absolutepath` |
+
+**两者都需要显式加依赖**（均已在 `server/tm-storage/pom.xml` 声明）：
 
 ```xml
 <dependency>
   <groupId>org.apache.shardingsphere</groupId>
   <artifactId>shardingsphere-infra-url-absolutepath</artifactId>
-  <version>5.5.3</version>
 </dependency>
 ```
 

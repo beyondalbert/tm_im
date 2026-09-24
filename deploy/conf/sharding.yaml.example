@@ -7,9 +7,8 @@
 #   开发： -Dsharding.url=jdbc:shardingsphere:classpath:sharding.yaml
 #   生产： -Dsharding.url=jdbc:shardingsphere:absolutepath:/etc/tm/sharding.yaml
 #
-# 注意：absolutepath 模式需要额外依赖
-#   org.apache.shardingsphere:shardingsphere-infra-url-absolutepath:5.5.3
-# （shardingsphere-jdbc 自带 classpath 加载器，但不含 absolutepath）
+# 注意：两种 URL 加载器都不随 shardingsphere-jdbc 自带（它只带 infra-url-core
+# 接口），必须显式加依赖。见 server/tm-storage/pom.xml。
 # ============================================================
 
 dataSources:

@@ -2,6 +2,9 @@
 deploy/conf/sharding.yaml
 deploy/conf/application-external.yml
 deploy/conf/application-local.yml
+# 生成物目录：tools/gen_runtime_config.py 会把真实凭据填进模板后写到这里。
+# 逐个列文件名容易漏（新增一个配置文件就漏一个），所以整个目录忽略。
+deploy/conf/runtime/
 *.env
 .env
 *.pem
