@@ -2,7 +2,9 @@ package com.tm.im.channel.wire;
 
 import java.io.ByteArrayOutputStream;
 import java.nio.charset.StandardCharsets;
+import java.util.ArrayList;
 import java.util.LinkedHashMap;
+import java.util.List;
 import java.util.Map;
 
 /**
@@ -140,6 +142,61 @@ public final class RawProto {
             }
         }
         return fields;
+    }
+
+    /**
+     * 取重复出现的长度分隔字段（如 {@code SyncResponse.messages}），按线上顺序返回。
+     *
+     * <p><b>为什么不能用 {@link #parse} 取 repeated 字段</b>：它返回的是
+     * 「字段号 → 一个值」的映射，重复字段只会留下<b>最后一个</b>。
+     * 于是“三条消息”会静默变成“一条消息”，而断言仍然能写得很像在验证正确的行为
+     * （比如只查第一条的 seq）。这里按线格式扫一遍，把该字段的每个实例都收集出来；
+     * 遇到目标字段不是长度分隔、或不认识的线类型则直接失败。
+     */
+    public static List<byte[]> repeatedFields(byte[] message, int field) {
+        if (message == null) {
+            // 载荷整个缺失 = 这个 repeated 字段一个实例也没有（proto3 不编码默认值）。
+            // 这是最普通的输入，不是异常：例如“本轮没什么要补”的 SyncResponse。
+            return List.of();
+        }
+        List<byte[]> out = new ArrayList<>();
+        int i = 0;
+        while (i < message.length) {
+            int[] cursor = {i};
+            long tag = readVarint(message, cursor);
+            i = cursor[0];
+
+            int f = (int) (tag >>> 3);
+            int wireType = (int) (tag & 0x7);
+            if (f <= 0) {
+                throw new IllegalArgumentException("字段号非法: " + f);
+            }
+            switch (wireType) {
+                case 0 -> {
+                    cursor[0] = i;
+                    readVarint(message, cursor);
+                    i = cursor[0];
+                }
+                case 2 -> {
+                    cursor[0] = i;
+                    long len = readVarint(message, cursor);
+                    i = cursor[0];
+                    if (len < 0 || i + len > message.length) {
+                        throw new IllegalArgumentException(
+                                "字段 " + f + " 声明长度 " + len + " 超出剩余 " + (message.length - i) + " 字节");
+                    }
+                    if (f == field) {
+                        byte[] v = new byte[(int) len];
+                        System.arraycopy(message, i, v, 0, (int) len);
+                        out.add(v);
+                    }
+                    i += (int) len;
+                }
+                default -> throw new IllegalArgumentException(
+                        "不支持的线类型 " + wireType + "（字段 " + f + "）——线上协议已变形");
+            }
+        }
+        return out;
     }
 
     private static long readVarint(byte[] buf, int[] cursor) {

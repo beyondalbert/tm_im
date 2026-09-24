@@ -27,7 +27,7 @@ public class ConversationRepositoryImpl implements ConversationRepository {
     private static final Logger log = LoggerFactory.getLogger(ConversationRepositoryImpl.class);
 
     /**
-     * 会话序号键前缀，与 DESIGN §10.3 的 key 设计一致：{@code tm:seq:{convId}}。
+     * 会话序号键前缀，与 DESIGN §10.4 的 key 设计一致：{@code tm:seq:{convId}}。
      *
      * <p>刻意 {@code public}：这是跨模块可见的<b>契约</b>（运维清缓存、
      * 其他节点的自愈脚本、集成测试都要按同一个键名操作）。

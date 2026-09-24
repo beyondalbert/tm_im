@@ -1,5 +1,6 @@
 package com.tm.im.channel.server;
 
+import com.tm.im.channel.codec.MessageMapper;
 import com.tm.im.channel.config.ChannelConfiguration;
 import com.tm.im.channel.config.NettyProperties;
 import com.tm.im.channel.registry.LocalConnectionRegistry;
@@ -7,12 +8,15 @@ import com.tm.im.channel.support.InMemoryIdentity;
 import com.tm.im.channel.support.InMemoryMessagePort;
 import com.tm.im.channel.wire.RawClient;
 import com.tm.im.channel.wire.RawProto;
+import com.tm.im.common.error.ErrorCode;
+import com.tm.im.core.message.MessageService;
 import org.junit.jupiter.api.AfterAll;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
 
 import java.io.IOException;
+import java.util.List;
 import java.util.Map;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
@@ -22,6 +26,7 @@ import java.util.concurrent.TimeUnit;
 import java.util.concurrent.TimeoutException;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.tuple;
 
 /**
  * M2 验收：<b>两个客户端经 WebSocket 连通，并能各自收发 PING/PONG</b>
@@ -60,6 +65,9 @@ class TwoClientEndToEndTest {
     private static final int CMD_READ = 13;
     private static final int CMD_SYNC = 14;
 
+    /** 续传整轮结束。{@code req_id} 与对应的 {@code CMD_SYNC} 相同。 */
+    private static final int CMD_SYNC_END = 15;
+
     /**
      * 续传响应。M3 之前它是 14（与请求同号，见 04-realtime.md §2.3 的修正记录），
      * 现在固定为 16 —— 这个字面量就是协议的锁：谁把它改回 14 或改成别的值，这里会失败。
@@ -90,10 +98,32 @@ class TwoClientEndToEndTest {
     /** PushMessage（proto: PushMessage）。 */
     private static final int PM_MESSAGE = 1;
 
-    /** Message（proto: Message）—— 只用到定位一条消息所需的前三个字段。 */
+    /** Message（proto: Message）。 */
     private static final int M_MESSAGE_ID = 1;
     private static final int M_CONV_ID = 2;
     private static final int M_SEQ = 3;
+    private static final int M_SENDER_ID = 4;
+    private static final int M_MSG_TYPE = 5;
+    private static final int M_CONTENT_JSON = 6;
+    private static final int M_CREATED_AT_MS = 8;
+
+    /** ConvCursor（proto: ConvCursor）。 */
+    private static final int CC_CONV_ID = 1;
+    private static final int CC_SINCE_SEQ = 2;
+
+    /** SyncRequest（proto: SyncRequest）。 */
+    private static final int SQ_CURSORS = 1;
+    private static final int SQ_LIMIT = 2;
+
+    /** SyncResponse（proto: SyncResponse）。 */
+    private static final int SR_MESSAGES = 1;
+    private static final int SR_HAS_MORE = 2;
+    private static final int SR_TRUNCATED = 3;
+
+    /** SyncEnd（proto: SyncEnd）。 */
+    private static final int SE_OK = 1;
+    private static final int SE_MESSAGE = 2;
+    private static final int SE_CONV_SYNCED = 3;
 
     /** KickNotice（proto: KickNotice）。 */
     private static final int KN_REASON = 1;
@@ -112,8 +142,11 @@ class TwoClientEndToEndTest {
     private static final int ERR_INVALID_TOKEN_FORMAT = 40102;
     private static final int ERR_INVALID_API_KEY = 40105;
     private static final int ERR_BAD_REQUEST = 40000;
+    private static final int ERR_MISSING_PARAMETER = 40001;
+    private static final int ERR_INVALID_PARAMETER = 40002;
     private static final int ERR_NOT_FRIENDS = 40003;
     private static final int ERR_INTERNAL_ERROR = 50000;
+    private static final int ERR_DATABASE_UNAVAILABLE = 50001;
 
     private static final String HOST = "127.0.0.1";
     private static final String WS_PATH = "/ws";
@@ -122,14 +155,24 @@ class TwoClientEndToEndTest {
     private static final String JWT_SECRET = "e2e-jwt-secret-must-be-at-least-32-bytes!!";
 
     private static final long ALICE = 1001L;
-    private static final long BOT = 2002L;
-    private static final String BOT_API_KEY = "sk_e2e_0123456789abcdef0123456789abcdef";
+    private static final long BOT = 2002L;    private static final String BOT_API_KEY = "sk_e2e_0123456789abcdef0123456789abcdef";
 
     /** 握手超时：故意调到 600ms，让「不发 AUTH 就被断开」可以真实地测到。 */
     private static final long AUTH_TIMEOUT_MS = 600L;
 
     /** 所有 socket 读超时。取值远大于任何一次真实往返，只在服务端漏回时触发。 */
     private static final int SOCKET_TIMEOUT_MS = 8_000;
+
+    // ------------------------------------------------------------------
+    // 续传用例专用的会话 id。
+    //
+    // 不能用 SEND/READ 用例那个 1001：InMemoryMessagePort 是**跨用例共享**的
+    // （它扮演的是存储，reset() 清的是“调用记录”而不是“数据”），
+    // 共用一个会话会让续传把别的用例刚发的消息也一起补下来——
+    // 断言随即变成「取决于用例执行顺序」。
+    // ------------------------------------------------------------------
+    private static final long CONV_SYNC = 3101L;
+    private static final long CONV_ROUNDS = 3102L;
 
     private static NettyProperties properties;
     private static InMemoryIdentity identity;
@@ -159,7 +202,8 @@ class TwoClientEndToEndTest {
         messages = new InMemoryMessagePort();
 
         server = new NettyServer(properties, identity.service(), registry, businessExecutor,
-                messages, java.time.ZoneId.of("Asia/Shanghai"));
+                messages, java.time.ZoneId.of("Asia/Shanghai"),
+                new MessageMapper(java.time.ZoneId.of("Asia/Shanghai")));
         server.start();
         port = server.port();
         assertThat(port).as("服务端必须真的绑定了一个端口").isPositive();
@@ -352,7 +396,7 @@ class TwoClientEndToEndTest {
     }
 
     @Test
-    @DisplayName("已就绪连接：重复 AUTH 回 40000；未接上的命令回 50000 而不是静默")
+    @DisplayName("已就绪连接：重复 AUTH 回 40000；续传请求本身不合法时也回明确的错")
     void readyConnectionAnswersProtocolMistakes() throws Exception {
         try (RawClient alice = webSocket()) {
             authenticate(alice, 1, identity.jwt(ALICE), "web-1");
@@ -362,26 +406,196 @@ class TwoClientEndToEndTest {
             Map<Integer, Object> duplicate = errorFrame(alice.expectFrame("重复 AUTH"));
             assertThat(RawProto.number(duplicate, ER_CODE)).isEqualTo(ERR_BAD_REQUEST);
 
-            // CMD_SYNC：协议歧义已经修好（响应有独立命令字 CMD_SYNC_RESP=16，
-            // 见 04-realtime.md §2.3 与本测试的另一个用例），但服务端还没有按 seq 读消息的
-            // 仓储，所以现在仍然回 50000。绝不能静默 —— 静默会让客户端一直等响应，
-            // 现象是「消息发出去没反应」，看起来像丢包。
-            alice.send(CMD_SYNC, 3, null);
+            // 续传的读取路径已经实现（见本类的几个续传用例），所以这里测的是「翻译层」：
+            // 业务侧的错误码必须原样出现在错误帧里，而不是被包装成 50000。
+            // 这里注的是 40001（一个游标都不带）：它是不可重试的——客户端要去改请求，
+            // 而不是退避重发。（“空游标回 40001”这条规则本身在 MessageServiceTest 里验证，
+            // 因为那是 MessageService 的职责；本类的内存替身不重写它。）
+            messages.failNextSyncWith(ErrorCode.MISSING_PARAMETER);
+            alice.send(CMD_SYNC, 3, syncRequest(1001, 0, 200));
+            Map<Integer, Object> noCursor = errorFrame(alice.expectFrame("续传的参数错误帧"));
+            assertThat(RawProto.number(noCursor, ER_CODE)).isEqualTo(ERR_MISSING_PARAMETER);
+            assertThat(RawProto.flag(noCursor, ER_RETRYABLE)).as("4xxxx 不可盲目重试").isFalse();
 
-            Map<Integer, Object> syncFrame = alice.expectFrame("CMD_SYNC");
+            // 载荷坏掉（长度声明越界）属于客户端问题 → 40002，而不是 50000。
+            // 用 50000 会让客户端去重试一个永远不会成功的请求，而它是可修的。
+            alice.send(CMD_SYNC, 4, new byte[]{(byte) 0x0A, (byte) 0xFF});
+            Map<Integer, Object> frame = alice.expectFrame("载荷损坏的 CMD_SYNC");
+            assertThat(RawProto.number(frame, F_CMD)).isEqualTo(CMD_ERROR);
             // 注意：req_id 在 Frame 里（字段 2），不在 ErrorFrame 里。
             // 把两者混起来读会拿到 ErrorFrame 的 message 字段（长度分隔），
             // 严格解析器会当场报「字段 2 不是 varint」。
-            assertThat(RawProto.number(syncFrame, F_CMD)).isEqualTo(CMD_ERROR);
-            assertThat(RawProto.number(syncFrame, F_REQ_ID)).isEqualTo(3);
+            assertThat(RawProto.number(frame, F_REQ_ID)).isEqualTo(4);
+            Map<Integer, Object> broken = errorFrame(frame);
+            assertThat(RawProto.number(broken, ER_CODE)).isEqualTo(ERR_INVALID_PARAMETER);
 
-            Map<Integer, Object> notImplemented = errorFrame(syncFrame);
-            assertThat(RawProto.number(notImplemented, ER_CODE)).isEqualTo(ERR_INTERNAL_ERROR);
-            assertThat(RawProto.text(notImplemented, ER_MESSAGE)).contains("CMD_SYNC");
-            assertThat(RawProto.flag(notImplemented, ER_RETRYABLE)).isTrue();
+            // 连接必须还活着：请求写错不该让客户端掉线
+            assertPingPong(alice, 5);
+        }
+    }
 
-            // 连接必须还活着：一条未实现的命令不该让客户端掉线
-            assertPingPong(alice, 4);
+    @Test
+    @DisplayName("M3：CMD_SYNC 补齐消息 —— 一帧 SYNC_RESP（16）后紧跟一帧 SYNC_END（15）")
+    void syncDeliversTheGapAndEndsTheRound() throws Exception {
+        try (RawClient alice = webSocket()) {
+            authenticate(alice, 1, identity.jwt(ALICE), "web-1");
+            messages.reset();
+
+            sendText(alice, 2, CONV_SYNC, "c-1", "你好");
+            sendText(alice, 3, CONV_SYNC, "c-2", "在吗");
+            sendText(alice, 4, CONV_SYNC, "c-3", "明天见");
+            messages.reset();
+
+            alice.send(CMD_SYNC, 5, syncRequest(CONV_SYNC, 0, 10));
+
+            Map<Integer, Object> respFrame = alice.expectFrame("SYNC_RESP");
+            assertThat(RawProto.number(respFrame, F_CMD)).as("命令字必须是 16，不是 14").isEqualTo(CMD_SYNC_RESP);
+            assertThat(RawProto.number(respFrame, F_REQ_ID)).as("req_id 必须原样回传").isEqualTo(5);
+            byte[] respPayload = RawProto.bytes(respFrame, F_PAYLOAD);
+            // 标量字段用 parse 读；重复字段（messages）必须走 repeatedFields —— 见 seqsOf 的注释。
+            Map<Integer, Object> respScalars = RawProto.parse(respPayload);
+            assertThat(RawProto.flag(respScalars, SR_HAS_MORE)).isFalse();
+            assertThat(RawProto.flag(respScalars, SR_TRUNCATED))
+                    .as("当前服务端不删消息，因此不能声称数据被截断")
+                    .isFalse();
+
+            List<byte[]> delivered = RawProto.repeatedFields(respPayload, SR_MESSAGES);
+            assertThat(delivered).as("三条都该补下来").hasSize(3);
+            assertThat(delivered.stream().map(m -> RawProto.number(RawProto.parse(m), M_SEQ)).toList())
+                    .as("必须按 seq 升序下发——客户端直接按顺序处理").containsExactly(1L, 2L, 3L);
+            Map<Integer, Object> first = RawProto.parse(delivered.get(0));
+            assertThat(RawProto.number(first, M_CONV_ID)).isEqualTo(CONV_SYNC);
+            assertThat(RawProto.number(first, M_SENDER_ID)).isEqualTo(ALICE);
+            assertThat(RawProto.number(first, M_MSG_TYPE)).isEqualTo(1);   // MSG_TYPE_TEXT
+            assertThat(RawProto.text(first, M_CONTENT_JSON)).contains("你好");
+            assertThat(RawProto.number(first, M_CREATED_AT_MS))
+                    .as("created_at_ms 必须非 0 —— 为 0 通常意味着忘了用 tm.time.zone 换算")
+                    .isPositive();
+
+            // 补齐了才发 END，而且 req_id 必须与请求相同（客户端靠它配对）
+            Map<Integer, Object> endFrame = alice.expectFrame("SYNC_END");
+            assertThat(RawProto.number(endFrame, F_CMD)).isEqualTo(CMD_SYNC_END);
+            assertThat(RawProto.number(endFrame, F_REQ_ID)).isEqualTo(5);
+            Map<Integer, Object> end = RawProto.parse(RawProto.bytes(endFrame, F_PAYLOAD));
+            assertThat(RawProto.flag(end, SE_OK)).isTrue();
+            assertThat(RawProto.number(end, SE_CONV_SYNCED)).isEqualTo(1);
+            assertThat(RawProto.text(end, SE_MESSAGE)).as("没有跳过的会话时不该带警示文字").isEmpty();
+
+            // 帧字段被原样翻译成调用（发送者来自已鉴权的会话，不是载荷里的东西）
+            assertThat(messages.syncs).hasSize(1);
+            assertThat(messages.syncs.get(0).actorId()).isEqualTo(ALICE);
+            assertThat(messages.syncs.get(0).limit()).isEqualTo(10);
+            assertThat(messages.syncs.get(0).cursors())
+                    .extracting(MessageService.SyncCursor::convId, MessageService.SyncCursor::sinceSeq)
+                    .containsExactly(tuple(CONV_SYNC, 0L));
+        }
+    }
+
+    @Test
+    @DisplayName("M3：has_more=true 时绝不发 SYNC_END（否则客户端以为已追平，缺的那段再没人补）")
+    void syncDoesNotSendEndWhileMoreRoundsArePending() throws Exception {
+        try (RawClient alice = webSocket()) {
+            authenticate(alice, 1, identity.jwt(ALICE), "web-1");
+            messages.reset();
+
+            sendText(alice, 2, CONV_ROUNDS, "c-1", "一");
+            sendText(alice, 3, CONV_ROUNDS, "c-2", "二");
+            sendText(alice, 4, CONV_ROUNDS, "c-3", "三");
+            messages.reset();
+
+            // 第一轮：每会话只给 2 条 → 还剩一条
+            alice.send(CMD_SYNC, 5, syncRequest(CONV_ROUNDS, 0, 2));
+            Map<Integer, Object> firstFrame = alice.expectFrame("第一轮 SYNC_RESP");
+            assertThat(RawProto.number(firstFrame, F_CMD)).isEqualTo(CMD_SYNC_RESP);
+            byte[] firstPayload = RawProto.bytes(firstFrame, F_PAYLOAD);
+            assertThat(RawProto.flag(RawProto.parse(firstPayload), SR_HAS_MORE)).isTrue();
+            assertThat(seqsOf(firstPayload)).containsExactly(1L, 2L);
+
+            // 第二轮：把游标推到本帧最后一条的 seq。
+            // 若上一轮错发了 SYNC_END，它此刻会排在前面——req_id=5/cmd=15 会让下面两条断言当场失败。
+            alice.send(CMD_SYNC, 6, syncRequest(CONV_ROUNDS, 2, 2));
+            Map<Integer, Object> secondFrame = alice.expectFrame("第二轮 SYNC_RESP");
+            assertThat(RawProto.number(secondFrame, F_REQ_ID))
+                    .as("上一轮的 req_id 是 5：收到它就说明 has_more=true 时也发了 SYNC_END")
+                    .isEqualTo(6);
+            assertThat(RawProto.number(secondFrame, F_CMD)).isEqualTo(CMD_SYNC_RESP);
+            byte[] secondPayload = RawProto.bytes(secondFrame, F_PAYLOAD);
+            assertThat(RawProto.flag(RawProto.parse(secondPayload), SR_HAS_MORE)).isFalse();
+            assertThat(seqsOf(secondPayload)).containsExactly(3L);
+
+            Map<Integer, Object> endFrame = alice.expectFrame("SYNC_END");
+            assertThat(RawProto.number(endFrame, F_CMD)).isEqualTo(CMD_SYNC_END);
+            assertThat(RawProto.number(endFrame, F_REQ_ID)).as("END 关联的是本次请求").isEqualTo(6);
+        }
+    }
+
+    @Test
+    @DisplayName("M3：跳过的会话游标在 SYNC_END 里点名（不是静默），且不计入已补齐数")
+    void syncReportsSkippedCursorsInTheEndFrame() throws Exception {
+        try (RawClient alice = webSocket()) {
+            authenticate(alice, 1, identity.jwt(ALICE), "web-1");
+            messages.reset();
+
+            long goneConv = 1002L;
+            messages.stubNextSync(new MessageService.SyncOutcome(
+                    List.of(), false, false, 0, List.of(goneConv)));
+
+            alice.send(CMD_SYNC, 7, syncRequest(goneConv, 5, 200));
+
+            Map<Integer, Object> respFrame = alice.expectFrame("SYNC_RESP");
+            assertThat(RawProto.number(respFrame, F_CMD)).isEqualTo(CMD_SYNC_RESP);
+            // 这一帧的 SyncResponse 是空的（没有消息、has_more/truncated 都是默认值），
+            // 而 proto3 不编码默认值 —— 于是线上真的<b>没有 payload 字段</b>。
+            // 客户端必须把「载荷缺失」当成「空的 SyncResponse」，而不是解析失败。
+            byte[] respPayload = RawProto.bytes(respFrame, F_PAYLOAD);
+            assertThat(respPayload == null || respPayload.length == 0)
+                    .as("空 SyncResponse 在 proto3 下就是空载荷（默认值不上线）")
+                    .isTrue();
+            assertThat(RawProto.flag(parseOrEmpty(respPayload), SR_HAS_MORE)).isFalse();
+            assertThat(RawProto.repeatedFields(respPayload, SR_MESSAGES)).isEmpty();
+
+            Map<Integer, Object> endFrame = alice.expectFrame("SYNC_END");
+            assertThat(RawProto.number(endFrame, F_CMD)).as("RESP 之后的下一帧必须是 SYNC_END").isEqualTo(CMD_SYNC_END);
+            assertThat(RawProto.number(endFrame, F_REQ_ID)).isEqualTo(7);
+            Map<Integer, Object> end = parseOrEmpty(RawProto.bytes(endFrame, F_PAYLOAD));
+            assertThat(RawProto.flag(end, SE_OK)).isTrue();
+            assertThat(RawProto.number(end, SE_CONV_SYNCED)).as("被跳过的会话不算已补齐").isZero();
+            assertThat(RawProto.text(end, SE_MESSAGE))
+                    .as("不说出来的话，客户端会永远带着一个已退群的游标重连，而没有任何人知道这件事")
+                    .contains("1002");
+        }
+    }
+
+    @Test
+    @DisplayName("M3：续传失败回错误帧（可重试），而不是一帧“看着像成功”的空结果")
+    void syncFailureIsReportedInsteadOfSilentSuccess() throws Exception {
+        try (RawClient alice = webSocket()) {
+            authenticate(alice, 1, identity.jwt(ALICE), "web-1");
+            messages.reset();
+
+            messages.failNextSyncWith(ErrorCode.DATABASE_UNAVAILABLE);
+            alice.send(CMD_SYNC, 8, syncRequest(CONV_SYNC, 0, 200));
+
+            Map<Integer, Object> frame = alice.expectFrame("SYNC 的错误帧");
+            assertThat(RawProto.number(frame, F_CMD))
+                    .as("失败时既不能发 RESP 也不能发 END：假的「这轮完了」会让缺失的消息永远没人知道")
+                    .isEqualTo(CMD_ERROR);
+            assertThat(RawProto.number(frame, F_REQ_ID)).isEqualTo(8);
+            Map<Integer, Object> error = errorFrame(frame);
+            assertThat(RawProto.number(error, ER_CODE)).isEqualTo(ERR_DATABASE_UNAVAILABLE);
+            assertThat(RawProto.flag(error, ER_RETRYABLE)).isTrue();
+
+            // 非业务异常（真正的服务端缺陷）则是 50000 —— 与 4xxxx 分开，
+            // 因为客户端对这两类错误的处置完全不同：后者重试永远不能成功。
+            messages.failNextSyncUnexpectedly();
+            alice.send(CMD_SYNC, 10, syncRequest(CONV_SYNC, 0, 200));
+            Map<Integer, Object> boomFrame = alice.expectFrame("SYNC 的内部错误帧");
+            assertThat(RawProto.number(boomFrame, F_CMD)).isEqualTo(CMD_ERROR);
+            Map<Integer, Object> boom = errorFrame(boomFrame);
+            assertThat(RawProto.number(boom, ER_CODE)).isEqualTo(ERR_INTERNAL_ERROR);
+            assertThat(RawProto.flag(boom, ER_RETRYABLE)).isTrue();
+
+            assertPingPong(alice, 11);
         }
     }
 
@@ -572,6 +786,60 @@ class TwoClientEndToEndTest {
         assertThat(RawProto.number(frame, F_CMD)).isEqualTo(CMD_PONG);
         assertThat(RawProto.number(frame, F_REQ_ID)).isEqualTo(reqId);
         assertThat(RawProto.bytes(frame, F_PAYLOAD)).as("PONG 不应带载荷").isNull();
+    }
+
+    /**
+     * 解析一个可能缺失的载荷。
+     *
+     * <p><b>为什么需要它</b>：proto3 不编码默认值，所以「一个字段都没设」的消息
+     * 在线上是零字节，连长度分隔字段本身都不会出现——{@code RawProto.bytes} 返回 null。
+     * 这不是异常数据，而是最普通的一种（例如“本轮没有任何消息要补”的 SyncResponse）。
+     * 客户端把它当解析失败的话，会在最正常的场景下报错。
+     */
+    private static Map<Integer, Object> parseOrEmpty(byte[] payload) {
+        return payload == null ? Map.of() : RawProto.parse(payload);
+    }
+
+    /**
+     * 构造 {@code SyncRequest} 载荷（04-realtime.md §6.2）：一个游标 + 每会话条数上限。
+     *
+     * <p>字段号写死而不是引用生成的常量：与命令字同理，proto 一变这里就该失败。
+     */
+    private static byte[] syncRequest(long convId, long sinceSeq, int limit) {
+        byte[] cursor = RawProto.concat(
+                RawProto.varintField(CC_CONV_ID, convId),
+                RawProto.varintField(CC_SINCE_SEQ, sinceSeq));
+        return RawProto.concat(
+                RawProto.lenField(SQ_CURSORS, cursor),
+                RawProto.varintField(SQ_LIMIT, limit));
+    }
+
+    /**
+     * 发一条文本消息并等回 {@code SEND_ACK}。
+     *
+     * <p>刻意是同步等待而不只是「发出去」：后续续传断言依赖“这几条消息已经落库且 seq 已定”，
+     * 不等 ACK 就发 SYNC 会让用例变成竞态（本类的另一个用例已经踩过一次这种坑）。
+     */
+    private static void sendText(RawClient client, long reqId, long convId,
+                                 String clientMsgId, String text) throws IOException {
+        client.send(CMD_SEND, reqId, RawProto.concat(
+                RawProto.varintField(1, convId),                                   // conv_id
+                RawProto.stringField(2, clientMsgId),                              // client_msg_id
+                RawProto.varintField(3, 1),                                        // msg_type = TEXT
+                RawProto.stringField(4, "{\"text\":\"" + text + "\"}")));   // content_json
+        Map<Integer, Object> ack = client.expectFrame("CMD_SEND_ACK");
+        assertThat(RawProto.number(ack, F_CMD)).isEqualTo(CMD_SEND_ACK);
+    }
+
+    /** 取一帧 {@code SyncResponse} 里每条消息的 seq，顺序即线上顺序。
+     *
+     * <p>必须走 {@link RawProto#repeatedFields}：{@code RawProto.parse} 是「字段号 → 一个值」
+     * 的映射，三条消息在那里只会剩下最后一条，而断言依旧会看起来很正常。
+     */
+    private static List<Long> seqsOf(byte[] syncResponse) {
+        return RawProto.repeatedFields(syncResponse, SR_MESSAGES).stream()
+                .map(m -> RawProto.number(RawProto.parse(m), M_SEQ))
+                .toList();
     }
 
     /** 断言是 CMD_ERROR 并返回 ErrorFrame 的字段表。 */

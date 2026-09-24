@@ -497,13 +497,30 @@ KickNotice {
 
 ## 6. 断点续传（核心机制）
 
-> ⚠️ **实现进度：协议已定稿，服务端读取路径尚未实现。**
-> 本节定义的命令字、方向与载荷已经冻结（§2.3，有机器校验），但服务端还没有
-> 「按 `(conv_id, since_seq)` 分页拉消息」的仓储，因此现在发 `CMD_SYNC` 会收到
-> `CMD_ERROR`（`50000`，`retryable=true`）——**不会静默**，但也不会返回消息。
-> 在它接通之前，请用 §8 的 REST 路径补齐断线消息；协议本身不会再变，
-> 接通后客户端无需改代码。当前行为由
-> `TwoClientEndToEndTest.readyConnectionAnswersProtocolMistakes` 钉住。
+> ✅ **服务端读取路径已实现**（DESIGN §10.2）。本节描述的字段、方向与载荷已冻结（§2.3，有机器校验），
+> 客户端按本节实现即可，不需要在“服务端还没做”这件事上做任何兼容分支。
+
+### 6.0 服务端的行为承诺
+
+下面每一条都是**可验证**的（右列是钉住它的测试用例，`tools/verify_integration_docs.py` 会检查
+这些用例名真的存在——文档引用在代码里找不到的用例，也是一类漂移）。
+
+| 服务端承诺 | 具体含义 | 钉住它的用例 |
+|---|---|---|
+| 只按 `seq > since_seq` 查 | 与断线时长、消息产生时间完全无关（§6.3） | `MessageSyncIT.syncReturnsExactlyTheMissingRangeInOrder` |
+| 每会话最多 `limit` 条 | 客户端传的 `limit` 会被收敛到 `tm.message.max-pull-size`（默认 200） | `MessageServiceTest.syncClampsPageSize` |
+| `has_more` 是精确值 | 服务端会多读一行来判断「还有没有」，不是估计值 | `MessageServiceTest.syncReportsHasMoreByFetchingOneExtraRow` |
+| `has_more=true` 时本帧必有消息 | 客户端总能把游标往前推，不会死循环 | `MessageServiceTest.syncReportsHasMoreByFetchingOneExtraRow` |
+| `has_more=true` 时**不发** `SYNC_END` | 否则客户端会以为已追平（§6.2） | `TwoClientEndToEndTest.syncDoesNotSendEndWhileMoreRoundsArePending` |
+| 补齐时 `SYNC_RESP` 后紧跟一帧 `SYNC_END` | 两帧 `req_id` 相同，且落在同一个 TCP 段里 | `TwoClientEndToEndTest.syncDeliversTheGapAndEndsTheRound` |
+| 一次最多带 N 个会话游标 | 超出回 `40002` 并要求分批（`tm.message.max-cursors-per-sync`，默认 50） | `MessageServiceTest.syncRejectsTooManyCursors` |
+| 非成员/已不存在的会话被跳过 | 整轮不因它失败；被跳过的会话在 `SYNC_END.message` 里点名 | `MessageSyncIT.nonMemberCursorIsSkippedWithoutLeakingItsMessages` |
+| 失败时回 `CMD_ERROR`（可重试） | 不会静默回一帧空结果：假成功比报错危险得多 | `TwoClientEndToEndTest.syncFailureIsReportedInsteadOfSilentSuccess` |
+| `truncated` 目前恒为 `false` | 服务端还没做归档，没有依据说「补不齐」（§6.4） | `MessageSyncIT.seqHolesAreLegalAndAreNotReportedAsTruncation` |
+
+服务端的实现取舍（为什么是「多读一行」而不是查 `max_seq`、为什么非成员游标只跳过不报错、
+为什么 `truncated` 不能从「某行不存在」反推）写在 DESIGN §10.2——那是服务端自己需要解释的东西，
+接入方只需依赖上表。
 
 ### 6.1 客户端需要持久化的唯一状态
 
@@ -519,7 +536,7 @@ KickNotice {
 1. 重连 + AUTH
 2. 构造 SYNC 请求，带上所有会话的 last_seq
 3. 服务端按 (conv_id, seq) 升序返回缺失消息（一帧 CMD_SYNC_RESP）
-4. 若 has_more=true，推进游标（取本帧最后一条的 seq）后继续发 SYNC，直到 false
+4. 若 has_more=true，按 §6.5 推进游标（每个会话推到本帧里**该会话**最后一条的 seq）后继续发 SYNC，直到 false
 5. 收到 SYNC_END 后，恢复正常实时接收
 ```
 
@@ -534,6 +551,11 @@ SyncRequest {
   limit: 200
 }
 ```
+
+> **两个请求侧的约束**（本地会话很多的客户端需要知道）：
+> 游标数不能超过 `tm.message.max-cursors-per-sync`（默认 50，超出回 `40002` 并要求分批），
+> 同一个 `conv_id` 不能出现两次（回 `40002`——「该按哪个游标算」没有定义，服务端不会替你挑一个）。
+> 分批时各批互不影响：每批有自己的 `has_more` 与自己的一对 `SYNC_RESP`/`SYNC_END`。
 
 **响应（`CMD_SYNC_RESP` = 16，S→C）：一次请求恰好收到一帧**，`req_id` 原样回传：
 
@@ -551,9 +573,15 @@ Frame {
 
 | 响应字段 | 客户端应做 |
 |---|---|
-| `has_more = true` | 推进游标（本帧最后一条的 seq）后再发一次 `CMD_SYNC` |
+| `has_more = true` | 按 §6.5 推进游标后再发一次 `CMD_SYNC`（本帧一定至少有一条消息，所以循环必然收敛） |
 | `has_more = false` | 紧接着会收到一帧 `CMD_SYNC_END`，此后恢复正常接收 |
 | `truncated = true` | 服务端补不齐（超出消息保留期），改用 REST 拉历史（§6.4） |
+
+> **载荷缺失不等于解析失败**：当本轮没有任何消息、且 `has_more`/`truncated` 都是默认值（`false`）时，
+> 整个 `SyncResponse` 的字段都是默认值，而 proto3 不编码默认值——线上就是<b>没有 `payload` 字段</b>。
+> 最正常的「没什么要补」就是这个形状，客户端必须把它当成空的 `SyncResponse`
+> （拿不到 `payload` 时按「空消息 + `has_more=false`」处理）。由
+> `TwoClientEndToEndTest.syncReportsSkippedCursorsInTheEndFrame` 钉住这一形状。
 
 ```protobuf
 Frame {
@@ -579,19 +607,38 @@ Frame {
 重连 SYNC(since_seq=7) → 返回 8,9,10   ✓ 一条不漏
 ```
 
-### 6.4 处理服务端截断
+### 6.4 服务端截断（`truncated`）
 
-若客户端离线太久（超过消息保留期，默认 30 天），服务端无法完整补齐：
-
-```protobuf
-SyncResponse { truncated: true }
-```
-
-此时客户端应改用 REST 拉历史：
+`truncated = true` 的含义是「你要的区间里有一部分服务端已经给不出来了」，此时客户端应改用 REST 拉历史：
 
 ```http
 GET /v1/conversations/1001/messages?limit=200&cursor=...
 ```
+
+**当前实现不会置位它，这是刻意的**：`seq` 在会话内允许有空洞（发消息时「取号即消耗」，
+重试、对账都会留下空洞），所以「某一行不存在」推不出「已被删除」——把空洞当成截断，
+客户端会去做一次没有意义的 REST 重拉（拿到的是同一批消息）。
+真正能回答「补得齐吗」的只有归档/清理任务的**水位**（「本会话 `seq <= N` 的消息已归档」）；
+它落地后，服务端才应据此置位。在此之前，SYNC 返回的就是库里现存的全部消息——
+所谓「保留期」目前由归档任务定义，而它尚未上线。
+
+### 6.5 推进游标的规则（最容易写错的一处）
+
+客户端为每个会话维护的 `last_seq` 语义必须精确：
+**「`seq <= last_seq` 的消息我已经全部处理完」**。由此推出三条处置：
+
+| 情况 | 该做什么 |
+|---|---|
+| `seq <= last_seq` | 忽略：重复投递，去重即可 |
+| `seq == last_seq + 1` | 处理它，`last_seq = seq` |
+| `seq > last_seq + 1`（中间有洞） | **先补洞**：用当前 `last_seq` 发一次 `SYNC`，把整段补齐后再推进 |
+
+为什么第三条必须这样：`seq` 允许有空洞，而**客户端分不清「这个号从来没用过」与「有这个号只是我没收到」**。
+把游标直接跳到洞后面的序号，等于把「没收到」判成「不存在」——那条消息再也不会被补回来。
+宁可多拉一次（最坏拿到一帧空响应，只花一个往返）。
+
+反过来，服务端给的两条保证让这个循环必然收敛：`seq > last_seq` 的消息一条都不会少（§6.3），
+且 `has_more=true` 时本帧一定有消息可以推进游标（§6.0）。
 
 ---
 
@@ -603,7 +650,7 @@ GET /v1/conversations/1001/messages?limit=200&cursor=...
 | 2 | **处理字段缺失** | protobuf3 默认值不编码，`req_id=0` 时字段不出现 |
 | 3 | **AUTH 必须第一帧** | 5 秒超时会被断开 |
 | 4 | **req_id 配对** | 并发请求靠它区分响应；推送的 req_id 恒为 0 |
-| 5 | **按 seq 去重** | `seq <= last_seen` 则忽略（用 `<=` 不是 `==`，防乱序） |
+| 5 | **按 seq 去重，但别把 last_seq 当成水位** | 已处理过的 `seq` 直接忽略；但「当前游标」是「连续处理到哪」，不是「见过的最大号」——`PUSH` 可丢，`seq > last_seq + 1` 说明中间有洞，要用 `last_seq` 发一次 `SYNC`（§6.5） |
 | 6 | **持久化 last_seq** | 每个会话一个整数，本地落盘 |
 | 7 | **应用层心跳** | 不要依赖 TCP keepalive |
 | 8 | **指数退避重连** | 1s → 2s → 4s → … 上限 30s，加抖动 |

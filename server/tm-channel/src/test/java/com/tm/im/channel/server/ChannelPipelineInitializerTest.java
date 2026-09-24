@@ -53,7 +53,8 @@ class ChannelPipelineInitializerTest {
         InMemoryIdentity identity = new InMemoryIdentity("initializer-test-secret-at-least-32-bytes");
         initializer = new TestableInitializer(properties, identity.service(),
                 new LocalConnectionRegistry(), executor, new ConnectionLimiter(10),
-                new InMemoryMessagePort(), java.time.ZoneId.of("Asia/Shanghai"));
+                new InMemoryMessagePort(), java.time.ZoneId.of("Asia/Shanghai"),
+                new com.tm.im.channel.codec.MessageMapper(java.time.ZoneId.of("Asia/Shanghai")));
     }
 
     @AfterAll
@@ -116,9 +117,10 @@ class ChannelPipelineInitializerTest {
                             ThreadPoolExecutor businessExecutor,
                             ConnectionLimiter limiter,
                             com.tm.im.core.message.MessageCommandPort messages,
-                            java.time.ZoneId databaseZone) {
+                            java.time.ZoneId databaseZone,
+                            com.tm.im.channel.codec.MessageMapper messageMapper) {
             super(properties, identityService, registry, businessExecutor, limiter,
-                    messages, databaseZone);
+                    messages, databaseZone, messageMapper);
         }
 
         void initFor(SocketChannel channel) {

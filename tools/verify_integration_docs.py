@@ -1,13 +1,20 @@
 """
 接入文档全量校验器。
 
-校验五件事，任何一项失败都会让接入方踩坑：
+校验七件事，任何一项失败都会让接入方踩坑：
   1. 文档中所有 hex 字节块能正确解码，且与 protobuf 官方编码一致
   2. 文档中「手写 protobuf 实现」的代码能被真实抽取并运行通过断言
   3. 文档中所有 JSON 代码块语法合法
   4. 文档间内部链接都存在
   5. 命令字契约：proto/transport.proto ↔ 04-realtime.md §2.1 ↔ 服务端 Frames 三方一致，
      且「一个命令字只有一种方向与一种载荷」
+  6. 06-no-sdk-guide.md 里那份手写客户端的命令字字典与 proto 一致
+  7. 文档里引用的测试用例（`XxxTest.methodName`）真的存在
+
+第 6、7 项都是“文档里的另一份手写副本”：
+  * 手写客户端的 CMD 字典漏一个命令字，接入方会把它解成“未知帧”；
+  * 文档点名“这条规则由 xxx 用例钉住”时，用例改名/删掉后引用就变成了谎话——
+    而读者会以为“有测试盯着”，于是放心改。
 
 运行：
   uv run --with protobuf python tools/verify_integration_docs.py
@@ -649,12 +656,104 @@ def check_command_contract():
     ok("DESIGN.md §7.5 总览包含全部 {} 个命令字，编号与方向一致".format(listed))
 
 
+def check_nosdk_command_dict():
+    print("\n" + "=" * 74)
+    print("6. 手写客户端的命令字字典：06-no-sdk-guide.md ↔ proto")
+    print("=" * 74)
+
+    txt = read(os.path.join(DOCS, "06-no-sdk-guide.md"))
+    m = re.search(r"^CMD = \{(.*?)^\}", txt, re.S | re.M)
+    if not m:
+        fail("06-no-sdk-guide.md 里找不到手写客户端的 CMD 字典")
+        return
+
+    dict_cmds = dict(re.findall(r'"([A-Z_]+)"\s*:\s*(\d+)', m.group(1)))
+    if not dict_cmds:
+        fail("06-no-sdk-guide.md 的 CMD 字典里没有解出任何命令字")
+        return
+
+    # proto 的命令字是 CMD_XXX，字典里写 XXX
+    proto = {name[4:]: spec["num"] for name, spec in parse_proto_cmds().items()}
+    # CMD_UNKNOWN 是保留值（0，从不发送），字典里不需要它
+    proto.pop("UNKNOWN", None)
+
+    missing = sorted(set(proto) - set(dict_cmds))
+    extra = sorted(set(dict_cmds) - set(proto))
+    for name in missing:
+        fail("06-no-sdk-guide.md 的 CMD 字典缺少 {}（接入方会把它解成“未知帧”）".format(name))
+    for name in extra:
+        fail("06-no-sdk-guide.md 的 CMD 字典里有 proto 里不存在的 {}".format(name))
+    for name in sorted(set(proto) & set(dict_cmds)):
+        if int(dict_cmds[name]) != proto[name]:
+            fail("06-no-sdk-guide.md 把 {} 写成 {}，proto 是 {}".format(
+                name, dict_cmds[name], proto[name]))
+    if not missing and not extra:
+        ok("CMD 字典与 proto 一致（{} 个命令字，保留值 UNKNOWN 除外）".format(len(proto)))
+
+
+# ============================================================
+# 7. 文档里点名的测试用例必须真的存在
+# ============================================================
+test_method_re = re.compile(r"([A-Za-z0-9]+(?:Test|IT))\.(?!java\b)([a-zA-Z][A-Za-z0-9_]*)")
+VOID_METHOD_RE = re.compile(r"\bvoid\s+([a-zA-Z_][A-Za-z0-9_]*)\s*\(")
+
+
+def java_test_methods() -> dict:
+    """扫服务端的测试源码，返回 {测试类名: {方法名}}。"""
+    index: dict = {}
+    root = os.path.join(ROOT, "server")
+    for dirpath, dirnames, filenames in os.walk(root):
+        dirnames[:] = [d for d in dirnames if d not in ("target", "__pycache__")]
+        if os.sep + "src" + os.sep + "test" + os.sep not in dirpath + os.sep:
+            continue
+        for name in filenames:
+            if not name.endswith(".java"):
+                continue
+            methods = set(VOID_METHOD_RE.findall(read(os.path.join(dirpath, name))))
+            index.setdefault(name[:-len(".java")], set()).update(methods)
+    return index
+
+
+def doc_files() -> list:
+    files = [os.path.join(ROOT, "README.md")]
+    for base in (DOCS, os.path.join(ROOT, "docs")):
+        for name in sorted(os.listdir(base)):
+            if name.endswith(".md"):
+                files.append(os.path.join(base, name))
+    return files
+
+
+def check_doc_test_references():
+    print("\n" + "=" * 74)
+    print("7. 文档引用的测试用例是否存在")
+    print("=" * 74)
+
+    index = java_test_methods()
+    if not index:
+        fail("没有扫到任何测试源码，无法校验文档引用")
+        return
+
+    refs = 0
+    for path in doc_files():
+        name = os.path.basename(path)
+        for cls, method in test_method_re.findall(read(path)):
+            refs += 1
+            if cls not in index:
+                fail("{}: 引用了不存在的测试类 {}".format(name, cls))
+            elif method not in index[cls]:
+                fail("{}: 引用了 {}.{}，但该类里没有这个方法"
+                     "（用例被改名/删掉后，这句“有测试盯着”就变成了谎话）".format(name, cls, method))
+    ok("校验 {} 处测试用例引用（对 {} 个测试类）".format(refs, len(index)))
+
+
 def main():
     out = check_hex_blocks()
     check_handwritten_proto(out)
     check_json_blocks()
     check_links()
     check_command_contract()
+    check_nosdk_command_dict()
+    check_doc_test_references()
     shutil.rmtree(out, ignore_errors=True)
 
     print("\n" + "=" * 74)

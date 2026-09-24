@@ -215,7 +215,7 @@ def enc_str(field: int, s: str) -> bytes:
 CMD = {
     "AUTH": 1, "AUTH_OK": 2, "PING": 3, "PONG": 4,
     "SEND": 10, "SEND_ACK": 11, "PUSH": 12, "READ": 13,
-    "SYNC": 14, "SYNC_END": 15, "KICK": 20, "ERROR": 21,
+    "SYNC": 14, "SYNC_END": 15, "SYNC_RESP": 16, "KICK": 20, "ERROR": 21,
 }
 CMD_NAME = {v: k for k, v in CMD.items()}
 
@@ -481,18 +481,28 @@ class Agent:
             await self.on_message(msg)
             return
 
-        if cmd == CMD["SYNC"]:
-            resp = decode_frame(f[3])
+        # 续传响应是 **16**，不是 14：14 只用于客户端发出的请求（04-realtime.md §2.3）。
+        # 两者分开编号，就是因为载荷类型完全由 cmd 决定，同一个编号没法区分两个方向。
+        if cmd == CMD["SYNC_RESP"]:
+            # 「本轮没什么要补」时 SyncResponse 的字段全是默认值，而 proto3 不编码默认值——
+            # 于是线上真的没有 payload 字段，f.get(3) 会拿不到。这不是异常，是最常见的一帧。
+            payload = f.get(3, b"")
+            resp = decode_frame(payload) if payload else {}
             has_more = resp.get(2, 0)
             # messages 是 repeated Message（字段号 1，可能有多个）
-            for m in self._extract_repeated(f[3], 1):
+            for m in self._extract_repeated(payload, 1):
                 msg = decode_message(m)
+                last_seq[msg["conv_id"]] = msg["seq"]
                 await self.on_message(msg)
-            if not has_more:
-                print("✓ 续传完成")
+            if has_more:
+                # 本轮没补齐：游标已经推到本帧最后一条，再发一次 SYNC（04-realtime.md §6.2）
+                await self.sync()
+            else:
+                print("✓ 续传完成（紧跟的 SYNC_END 表示整轮结束）")
             return
 
         if cmd == CMD["SYNC_END"]:
+            # 它只在 has_more=false 时出现：收到它就说明补齐了，可以开始收实时推送
             print("✓ 续传结束")
             return
 

@@ -22,8 +22,11 @@ import org.springframework.stereotype.Service;
 
 import java.time.LocalDateTime;
 import java.time.ZoneId;
+import java.util.ArrayList;
+import java.util.HashSet;
 import java.util.List;
 import java.util.Optional;
+import java.util.Set;
 
 /**
  * 消息写入 —— DESIGN §10.1 的实现，也是 REST 与长连接<b>共用</b>的那一条路径。
@@ -49,6 +52,12 @@ import java.util.Optional;
  * <p><b>本类除了数据库之外不做等待</b>：扇出走的是本节点内存注册表
  * （{@link MessagePushPort} 的本地实现）。跨节点投递要经 Redis Pub/Sub，
  * 那时才必须挪到独立线程池；现在挪只会引入一个没有收益的异步边界。
+ *
+ * <p><b>本类同时实现断点续传的<b>读</b>路径</b>（{@link #sync}，DESIGN §10.2）：
+ * 它读的就是写路径落下的同一张表、同一个 {@code seq} 序列。两者放在一个类里，
+ * 是因为它们共用同一条不变量——<b>{@code seq} 在会话内严格递增且允许有空洞</b>；
+ * 写入侧为此不自愈不重排（“取号即消耗”），读取侧因此只能表达
+ * “凡 seq 大于游标的都已返回”，而不能表达“序列连续”。两边分开写就会各自漂。
  */
 @Service
 public class MessageService implements MessageCommandPort {
@@ -165,7 +174,146 @@ public class MessageService implements MessageCommandPort {
         return lastReadSeq;
     }
 
+    // ------------------------------------------------------------------ 续传读取
+
+    /** 续传请求里的一个会话游标：只要该会话 {@code seq > sinceSeq} 的消息。 */
+    public record SyncCursor(long convId, long sinceSeq) {
+    }
+
+    /**
+     * 续传请求（04-realtime.md §6.2）。一次可以带多个会话的游标。
+     *
+     * @param actorId 已鉴权的身份，<b>不是</b>客户端自报的字段——每个游标都要拿它做成员校验
+     * @param limit   每个会话最多返回多少条；{@code <= 0} 表示用服务端默认值
+     */
+    public record SyncCommand(long actorId, List<SyncCursor> cursors, int limit) {
+    }
+
+    /**
+     * 续传结果。
+     *
+     * @param messages     本次要发给客户端的消息，按「请求里的游标顺序 → 会话内 seq 升序」排列
+     * @param hasMore      本轮还没补齐：客户端把游标推到本帧最后一条的 seq 后再发一次
+     * @param truncated    服务端补不齐（见 {@link #sync} 的说明；当前恒为 false）
+     * @param convsSynced  本轮真正服务了的会话数（不含被跳过的）
+     * @param skippedConvs 被跳过的会话（非成员 / 会话不存在）：一条消息也不返回，但也不让整轮失败
+     */
+    public record SyncOutcome(List<Message> messages,
+                              boolean hasMore,
+                              boolean truncated,
+                              int convsSynced,
+                              List<Long> skippedConvs) {
+    }
+
+    /**
+     * 断点续传拉取（{@code CMD_SYNC}，DESIGN §10.2）。
+     *
+     * <p><b>只按 {@code seq > since_seq} 查，与断线时长、与消息产生时间完全无关</b>
+     * （04-realtime.md §6.3）。这是「一条不漏」的全部依据：任何基于时间窗的补拉
+     * 都会在冷会话上漏消息，而冷会话恰恰是断线最久、最需要补的那个。
+     *
+     * <p><b>{@code has_more} 是精确值，不是估计值</b>：每个会话多取一行
+     * （{@code limit + 1}），多出来的那一行只用于回答「还有没有」。
+     * 换一种写法（查 {@code maxSeq} 再比大小）会多一次查询，
+     * 而且两次查询之间刚好插入一条新消息时会把 {@code has_more} 判成 true——
+     * 那是一个纯粹由并发引入的、无法复现的「多一轮拉取」。
+     *
+     * <p><b>它不是「补齐了才返回」</b>：一帧最多带
+     * {@code 游标数 × 每个游标的 limit} 条消息，所以本轮没补完时
+     * {@code hasMore=true}，由客户端推进游标后再请求一次。
+     * 由此得到一条可被测试钉住的不变量：<b>{@code hasMore=true} 的响应里不可能一条消息都没有</b>
+     * （{@code limit >= 1} 才会走到「多出来一行」，所以客户端总能推进游标，不会死循环）。
+     *
+     * <p><b>非成员 / 不存在的会话游标被跳过，而不是让整轮失败</b>：
+     * 退群之后客户端的本地会话列表不会当场消失，它会一直带着那个游标重连。
+     * 若为此回 40303，该用户从此<b>补不了任何会话</b>的消息（包括那些与他无关的失败），
+     * 而修它的办法（清理本地游标）恰好又要靠 SYNC 才能发现。
+     * 跳过的游标会出现在 {@link SyncOutcome#skippedConvs()} 里并被记 WARN，
+     * 由 {@code CMD_SYNC_END} 的 {@code message} 字段告诉客户端——不是静默。
+     *
+     * <p><b>{@code truncated} 目前恒为 false，且这是刻意的</b>：
+     * 它的含义是「你要的区间里有一部分服务端已经给不出来了」。
+     * 消息表允许 {@code seq} 有空洞（取号即消耗，见
+     * {@link #insertWithSeqSelfHeal}），所以「某一行不存在」
+     * <b>不能</b>被解释成「已经被删了」——那是假警报，而假警报会让客户端去 REST 重拉一遍
+     * 拿到同样的东西。真正能回答这个问题的只有归档/清理任务的<b>水位</b>
+     * （「本会话 {@code seq <= N} 的消息已被归档」），它还没实现，
+     * 因此现在没有任何依据把 {@code truncated} 置为 true。
+     * 归档任务上线时应当补一个水位并在读到它之前置位，而不是在这里猜。
+     */
+    @Override
+    public SyncOutcome sync(SyncCommand cmd) {
+        validateSync(cmd);
+
+        // 每会话的配额。客户端传 0 表示「用服务端默认值」（proto 里 limit 的语义）。
+        int pageSize = properties.clampPullSize(cmd.limit());
+        List<Message> collected = new ArrayList<>();
+        List<Long> skipped = new ArrayList<>();
+        boolean hasMore = false;
+
+        // 顺序执行而不是并行：业务线程池的并发度就是这里的背压。
+        // 并行化会把「一个客户端的一帧」变成 50 个并发查询，那是把背压从连接级
+        // 搬到数据库连接池上——池子满之后，症状是全体用户的请求一起变慢。
+        for (SyncCursor cursor : cmd.cursors()) {
+            if (!conversations.isMember(cursor.convId(), cmd.actorId())) {
+                skipped.add(cursor.convId());
+                log.warn("SYNC 跳过不可访问的会话 actorId={} convId={}（非成员或会话不存在）",
+                        cmd.actorId(), cursor.convId());
+                continue;
+            }
+            List<Message> page = messages.listAfterSeq(cursor.convId(), cursor.sinceSeq(), pageSize + 1);
+            if (page.size() > pageSize) {
+                hasMore = true;
+                page = page.subList(0, pageSize);
+            }
+            collected.addAll(page);
+        }
+
+        int convsSynced = cmd.cursors().size() - skipped.size();
+        log.debug("SYNC actorId={} 游标={} 服务会话={} 返回={} 条 hasMore={} 跳过={}",
+                cmd.actorId(), cmd.cursors().size(), convsSynced, collected.size(), hasMore, skipped);
+        return new SyncOutcome(List.copyOf(collected), hasMore, false, convsSynced, List.copyOf(skipped));
+    }
+
     // ------------------------------------------------------------------ 校验
+
+    /**
+     * 续传请求的准入。
+     *
+     * <p>三种拒绝都不能含混：游标数为 0 是「客户端没什么要补的，却还是发了请求」
+     * （40001），负游标是「游标本身坏了」（40010，与 {@link #markRead} 同一个码），
+     * 同一个 conv_id 出现两次则是「本轮该按哪个游标算」根本没有定义——
+     * 这种歧义不能由服务端静默挑一个（挑高的会跳过中间的消息，挑低的会重复下发）。
+     */
+    private void validateSync(SyncCommand cmd) {
+        if (cmd.actorId() <= 0) {
+            throw new TmException(ErrorCode.INVALID_PARAMETER, "actorId=" + cmd.actorId());
+        }
+        List<SyncCursor> cursors = cmd.cursors();
+        if (cursors == null || cursors.isEmpty()) {
+            throw new TmException(ErrorCode.MISSING_PARAMETER, "cursors 不能为空");
+        }
+        int max = properties.getMaxCursorsPerSync();
+        if (cursors.size() > max) {
+            // 说清「请分批」，而不是只说「参数非法」：客户端有能力自己修好这件事，
+            // 但前提是它知道上限在哪、以及这不是一个需要重试的错误。
+            throw new TmException(ErrorCode.INVALID_PARAMETER,
+                    "cursors 数量 " + cursors.size() + " 超过单次上限 " + max + "，请分批发送");
+        }
+        Set<Long> seen = new HashSet<>();
+        for (SyncCursor cursor : cursors) {
+            if (cursor.convId() <= 0) {
+                throw new TmException(ErrorCode.INVALID_PARAMETER, "conv_id 必须为正整数: " + cursor.convId());
+            }
+            if (cursor.sinceSeq() < 0) {
+                throw new TmException(ErrorCode.INVALID_CURSOR, "since_seq 不能为负: " + cursor.sinceSeq());
+            }
+            if (!seen.add(cursor.convId())) {
+                throw new TmException(ErrorCode.INVALID_PARAMETER,
+                        "conv_id " + cursor.convId() + " 在一次请求里出现了多次");
+            }
+        }
+    }
 
     private void validate(SendCommand cmd) {
         if (cmd.convId() <= 0) {
@@ -348,7 +496,7 @@ public class MessageService implements MessageCommandPort {
     // ------------------------------------------------------------------ 扇出
 
     /**
-     * 扇出（DESIGN §10.2）。
+     * 扇出（DESIGN §10.3）。
      *
      * <p>大群只落库、不逐成员推送：10 万人群发一条消息会触发 10 万次写，
      * 那是能把整个系统打趴的量级。转读扩散后客户端按 {@code last_seq} 自己拉。

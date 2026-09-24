@@ -1,6 +1,7 @@
 package com.tm.im.channel.handler;
 
 import com.tm.im.channel.codec.Frames;
+import com.tm.im.channel.codec.MessageMapper;
 import com.tm.im.channel.config.ChannelConfiguration;
 import com.tm.im.channel.session.ChannelAttributes;
 import com.tm.im.channel.session.TmSession;
@@ -8,17 +9,24 @@ import com.tm.im.common.error.ErrorCode;
 import com.tm.im.common.error.TmException;
 import com.tm.im.core.message.MessageCommandPort;
 import com.tm.im.core.message.MessageService;
+import com.tm.im.domain.entity.Message;
 import com.tm.im.domain.enums.MessageType;
+import com.tm.im.proto.transport.ConvCursor;
 import com.tm.im.proto.transport.Frame;
 import com.tm.im.proto.transport.ReadRequest;
 import com.tm.im.proto.transport.SendAck;
 import com.tm.im.proto.transport.SendRequest;
+import com.tm.im.proto.transport.SyncEnd;
+import com.tm.im.proto.transport.SyncRequest;
+import com.tm.im.proto.transport.SyncResponse;
 import io.netty.channel.ChannelHandlerContext;
 import io.netty.channel.SimpleChannelInboundHandler;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 import java.time.ZoneId;
+import java.util.ArrayList;
+import java.util.List;
 import java.util.concurrent.ThreadPoolExecutor;
 
 /**
@@ -28,16 +36,15 @@ import java.util.concurrent.ThreadPoolExecutor;
  * 任何在这里直接查库的写法都会让一条慢查询拖住该 EventLoop 上的<b>所有</b>连接——
  * 这正是 §7.3 那条铁律要禁止的事。{@link AuthHandler} 的类注释里有同一条理由。
  *
- * <p><b>不再存在的协议歧义：{@code CMD_SYNC}</b>。它曾同时被用作请求
- * （{@code SyncRequest}）与响应（{@code SyncResponse}），而 {@link Frames#body}
- * 的「命令字 ↔ 载荷类型」唯一对应表正是为了禁止这种歧义存在的（同一对端口上，
- * 接收方无法区分自己收到的是请求还是响应）。现已给响应独立编号
- * {@code CMD_SYNC_RESP(16)}（proto 与 04-realtime.md §2.3 已同步）。
+ * <p><b>{@code CMD_SYNC} 的读取路径已接通</b>（DESIGN §10.2）。一次请求恰好回一帧
+ * {@code CMD_SYNC_RESP(16)}，且<b>只在 {@code has_more=false} 时</b>再跟一帧
+ * {@code CMD_SYNC_END(15)}。在 {@code has_more=true} 时发 END 是这里最容易犯的错：
+ * 客户端会以为已经追平并开始接收实时推送，而中间缺的那段再也没人补。
+ * 两个方向各由一个用例钉住（补齐时会收到 END；还有下一轮时<b>不会</b>收到）。
  *
- * <p><b>{@code CMD_SYNC} 目前回 50000</b>（内部错误，可重试）而<b>不是静默忽略</b>：
- * 静默忽略会让客户端一直等 ACK，最终表现为「消息发出去没反应」这种最难排查的现象——
- * 看起来像丢包，实际是服务端根本没打算回。它回 50000 的原因是<b>服务端读取路径还没实现</b>
- * （按 seq 拉消息的仓储与分页），这是下一步的事，与协议无关了。
+ * <p>业务侧只回一个 {@link MessageService.SyncOutcome}，帧怎么发由本类决定：
+ * 「跳过了哪些会话」（非成员或会话已不存在）写在 END 的 {@code message} 里——
+ * 这样客户端才能发现自己本地还留着一个已退群的会话游标，而不是永远带着它重连。
  *
  * <p><b>方向门禁</b>：协议里有一部分命令只由服务端发出（{@code CMD_PUSH}、
  * {@code CMD_SYNC_RESP}、{@code CMD_SEND_ACK}…）。它们如果从客户端发来，
@@ -56,18 +63,24 @@ public class BusinessHandler extends SimpleChannelInboundHandler<Frame> {
     private final MessageCommandPort messages;
     private final ThreadPoolExecutor businessExecutor;
     private final ZoneId databaseZone;
+    private final MessageMapper messageMapper;
 
     /**
      * @param databaseZone 库里 {@code DATETIME} 所代表的时区（{@code tm.time.zone}）。
      *                     回执里的 {@code created_at_ms} 必须用它换算：库里存的是不带
      *                     时区的墙上时间，用 UTC 去解释会让客户端看到的时间差 8 小时，
      *                     而消息内容、顺序、未读数全部正常——最难发现的一类错。
+     * @param messageMapper 领域消息 → 传输消息的唯一转换点。续传帧里的消息
+     *                     与推送帧里的必须是同一种翻译（同一个 {@code Message} 对象
+     *                     可能先经过它发 PUSH、断线后又被 SYNC 补一次），
+     *                     所以这里复用同一个组件而不是自己拼字段。
      */
     public BusinessHandler(MessageCommandPort messages, ThreadPoolExecutor businessExecutor,
-                          ZoneId databaseZone) {
+                          ZoneId databaseZone, MessageMapper messageMapper) {
         this.messages = messages;
         this.businessExecutor = businessExecutor;
         this.databaseZone = databaseZone;
+        this.messageMapper = messageMapper;
     }
 
     @Override
@@ -116,12 +129,7 @@ public class BusinessHandler extends SimpleChannelInboundHandler<Frame> {
                             "authentication not completed");
                     return;
                 }
-                // 协议歧义已修（响应改用 CMD_SYNC_RESP，见类注释与 04-realtime.md §2.3），
-                // 这里缺的是服务端实现：按 (conv_id, seq) 分页读消息的仓储。
-                log.warn("收到尚未实现的命令 cmd=SYNC actorId={} —— 协议已定稿，缺服务端读取路径",
-                        session.actorId());
-                respond(ctx, frame.getReqId(), ErrorCode.INTERNAL_ERROR,
-                        "command not implemented yet: CMD_SYNC");
+                handleSync(ctx, frame, session);
             }
             case CMD_PING, CMD_PONG -> {
                 // 正常情况下被 HeartbeatHandler 消化，走不到这里。
@@ -214,6 +222,74 @@ public class BusinessHandler extends SimpleChannelInboundHandler<Frame> {
                 respondAsync(ctx, reqId, ErrorCode.INTERNAL_ERROR, null);
             }
         });
+    }
+
+    /**
+     * 断点续传（04-realtime.md §6.2）：一帧 {@code SYNC_RESP}，必要时再一帧 {@code SYNC_END}。
+     *
+     * <p>两帧的顺序不能反、{@code req_id} 必须都是请求的那个值：客户端靠
+     * 「同一个 {@code req_id} 的 RESP 后面还跟不跟 END」来判断本轮是否结束（§6.2）。
+     * 这里用「先 write 再 writeAndFlush」而不是两次 {@code writeAndFlush}：
+     * 两帧会落在同一个 TCP 段里，客户端不会看到「RESP 到了而 END 还在路上」的中间态。
+     */
+    private void handleSync(ChannelHandlerContext ctx, Frame frame, TmSession session) {
+        SyncRequest request;
+        try {
+            request = Frames.body(frame, SyncRequest.getDefaultInstance());
+        } catch (Frames.FrameBodyException e) {
+            respond(ctx, frame.getReqId(), ErrorCode.INVALID_PARAMETER, e.getMessage());
+            return;
+        }
+
+        long reqId = frame.getReqId();
+        ChannelConfiguration.submitBusiness(businessExecutor, ctx.channel(), () -> {
+            try {
+                MessageService.SyncOutcome outcome = messages.sync(new MessageService.SyncCommand(
+                        session.actorId(), cursorsOf(request), request.getLimit()));
+
+                SyncResponse.Builder response = SyncResponse.newBuilder()
+                        .setHasMore(outcome.hasMore())
+                        .setTruncated(outcome.truncated());
+                for (Message message : outcome.messages()) {
+                    response.addMessages(messageMapper.toTransport(message));
+                }
+                Frame respFrame = Frames.of(Frame.Cmd.CMD_SYNC_RESP, reqId, response.build());
+
+                if (outcome.hasMore()) {
+                    // 本轮没补齐：只回 RESP。绝不回 END（04-realtime.md §6.2）——
+                    // 客户端会在还没补齐的情况下以为已经追平。
+                    ctx.writeAndFlush(respFrame);
+                    return;
+                }
+
+                SyncEnd.Builder end = SyncEnd.newBuilder()
+                        .setOk(true)
+                        .setConvSynced(outcome.convsSynced());
+                if (!outcome.skippedConvs().isEmpty()) {
+                    // 跳过是「不因此失败」，不是「不重要」：不说出来的话，
+                    // 客户端会永远带着那个已退群的游标重连，而没有任何人知道这件事。
+                    end.setMessage("skipped " + outcome.skippedConvs().size()
+                            + " cursor(s) you cannot access: " + outcome.skippedConvs());
+                }
+                ctx.write(respFrame);
+                ctx.writeAndFlush(Frames.of(Frame.Cmd.CMD_SYNC_END, reqId, end.build()));
+            } catch (TmException e) {
+                respondAsync(ctx, reqId, e.errorCode(), e.detail());
+            } catch (RuntimeException e) {
+                log.error("续传失败 actorId={} cursors={}", session.actorId(),
+                        request.getCursorsCount(), e);
+                respondAsync(ctx, reqId, ErrorCode.INTERNAL_ERROR, null);
+            }
+        });
+    }
+
+    /** protobuf 游标 → 领域游标。转换处不做校验：规则只有一处，在 {@link MessageService} 里。 */
+    private static List<MessageService.SyncCursor> cursorsOf(SyncRequest request) {
+        List<MessageService.SyncCursor> cursors = new ArrayList<>(request.getCursorsCount());
+        for (ConvCursor cursor : request.getCursorsList()) {
+            cursors.add(new MessageService.SyncCursor(cursor.getConvId(), cursor.getSinceSeq()));
+        }
+        return cursors;
     }
 
     /** 同步回错（IO 线程上）。 */

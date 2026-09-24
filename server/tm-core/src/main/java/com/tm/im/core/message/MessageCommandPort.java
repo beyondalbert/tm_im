@@ -27,4 +27,15 @@ public interface MessageCommandPort {
 
     /** 已读上报。语义见 {@link MessageService#markRead}。 */
     long markRead(long convId, long actorId, long lastReadSeq);
+
+    /**
+     * 断点续传拉取（{@code CMD_SYNC}）。语义见 {@link MessageService#sync}。
+     *
+     * <p>它在这层接口里的意义与其他两个方法不同：{@code sync} 是唯一一个
+     * <b>把存储里的数据读回来发给客户端</b>的命令，因此它的替身实现（tm-channel 的内存版）
+     * 必然会“看起来像”真的仓储——而它到底有没有正确算 {@code has_more}、
+     * 该不该跳过非成员会话，那些判断在 {@link MessageService} 里（由 tm-core 的测试验证）。
+     * 上层只负责「把这个结果翻译成一帧 SYNC_RESP（必要时再跟一帧 SYNC_END）」。
+     */
+    MessageService.SyncOutcome sync(MessageService.SyncCommand cmd);
 }

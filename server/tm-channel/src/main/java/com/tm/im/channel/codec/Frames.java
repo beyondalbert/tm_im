@@ -181,7 +181,8 @@ public final class Frames {
      *
      * <p>{@code SYNC_RESP} 也不能丢：它虽然也能重新请求，但客户端此刻正处
      * 「先补齐再接收实时」的状态（04-realtime.md §6.2），丢掉它的表现是续传静默卡住，
-     * 直到客户端自己的超时才发现。宁可断开让客户端重连，也不要让它悬着。
+     * 直到客户端自己的超时才发现。{@code SYNC_END} 同理——它是「这轮完了」的唯一信号，
+     * 丢了客户端会一直等一个永不到来的结束。宁可断开让客户端重连，也不要让它悬着。
      */
     public static boolean droppableUnderBackpressure(Frame.Cmd cmd) {
         return cmd == Frame.Cmd.CMD_PUSH;

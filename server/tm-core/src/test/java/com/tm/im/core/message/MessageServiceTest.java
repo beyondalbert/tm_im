@@ -23,6 +23,7 @@ import org.springframework.dao.DuplicateKeyException;
 import java.time.LocalDateTime;
 import java.time.ZoneId;
 import java.util.ArrayList;
+import java.util.Comparator;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
@@ -30,6 +31,7 @@ import java.util.Optional;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
+import static org.assertj.core.api.Assertions.tuple;
 
 /**
  * {@link MessageService} 的写路径规则。
@@ -45,6 +47,12 @@ import static org.assertj.core.api.Assertions.assertThatThrownBy;
  *   <li>被拒绝的请求<b>不取号、不落库</b>（否则一次误发就占掉一个 seq）；</li>
  *   <li>序号撞主键时用「库内最大 seq」自愈并重试（这是 Redis 被清空后唯一的修复机会）。</li>
  * </ol>
+ *
+ * <p>下半部分是续传读取（{@link MessageService#sync}）的规则。它与写入共用一条不变量：
+ * {@code seq} 允许有空洞，因此读取侧只能表达「凡 seq 大于游标的都已返回」——
+ * 这条不变量决定了三件容易被改错的事：{@code has_more} 必须由「多取一行」得出
+ * （不能查 maxSeq 再比大小）、{@code has_more=true} 时必需要有一条消息可推进游标
+ * （否则客户端死循环）、{@code truncated} 不能由「某行不存在」反推（那是假警报）。
  */
 class MessageServiceTest {
 
@@ -282,6 +290,173 @@ class MessageServiceTest {
         assertThat(conversations.lastReadUpdates).containsExactly("1001:2002=3");
     }
 
+    // ================================================================ 续传读取（DESIGN §10.2）
+
+    @Test
+    @DisplayName("续传：返回 since_seq 之后的消息（按 seq 升序），一轮补齐时时 has_more=false")
+    void syncReturnsMessagesAfterCursor() {
+        messages.seed(CONV, 1, 2, 3, 4, 5);
+
+        MessageService.SyncOutcome outcome = service.sync(new MessageService.SyncCommand(
+                ALICE, List.of(new MessageService.SyncCursor(CONV, 2)), 200));
+
+        assertThat(outcome.messages()).extracting(Message::getSeq).containsExactly(3L, 4L, 5L);
+        assertThat(outcome.hasMore()).isFalse();
+        assertThat(outcome.truncated())
+                .as("没有归档水位就不能声称数据被截断：seq 空洞是合法的，把「行不存在」当成「被删了」是假警报")
+                .isFalse();
+        assertThat(outcome.convsSynced()).isEqualTo(1);
+        assertThat(outcome.skippedConvs()).isEmpty();
+    }
+
+    @Test
+    @DisplayName("续传：多取一行判 has_more —— 取满即 true，且 true 时一定有消息可以推进游标")
+    void syncReportsHasMoreByFetchingOneExtraRow() {
+        messages.seed(CONV, 1, 2, 3);
+
+        MessageService.SyncOutcome outcome = service.sync(new MessageService.SyncCommand(
+                ALICE, List.of(new MessageService.SyncCursor(CONV, 0)), 2));
+
+        assertThat(outcome.messages()).extracting(Message::getSeq).containsExactly(1L, 2L);
+        assertThat(outcome.hasMore()).isTrue();
+        assertThat(messages.listLimits)
+                .as("多取一行是精确判断 has_more 的唯一办法（查 maxSeq 会多一次查询，且有竞态）")
+                .containsExactly(3);
+        assertThat(outcome.messages())
+                .as("has_more=true 却一条消息都没有时，客户端无法推进游标，会死循环")
+                .isNotEmpty();
+    }
+
+    @Test
+    @DisplayName("续传：刚好取完时 has_more=false（多取的那一行是判据，不是数据）")
+    void syncDoesNotReportHasMoreWhenThePageIsExactlyFull() {
+        messages.seed(CONV, 1, 2);
+
+        MessageService.SyncOutcome outcome = service.sync(new MessageService.SyncCommand(
+                ALICE, List.of(new MessageService.SyncCursor(CONV, 0)), 2));
+
+        assertThat(outcome.messages()).hasSize(2);
+        assertThat(outcome.hasMore()).isFalse();
+    }
+
+    @Test
+    @DisplayName("续传：limit=0 用服务端默认值，超限收敛到 maxPullSize（客户端传 10 万不能真的拉 10 万行）")
+    void syncClampsPageSize() {
+        messages.seed(CONV, 1);
+
+        service.sync(new MessageService.SyncCommand(ALICE, List.of(new MessageService.SyncCursor(CONV, 0)), 0));
+        service.sync(new MessageService.SyncCommand(ALICE, List.of(new MessageService.SyncCursor(CONV, 0)), 100_000));
+
+        // 201 = 默认 maxPullSize(200) + 用来判 has_more 的那一行
+        assertThat(messages.listLimits).containsExactly(201, 201);
+    }
+
+    @Test
+    @DisplayName("续传：多个游标各自判 has_more（一个没补齐整轮就没结束），顺序按请求")
+    void syncServesEveryCursorIndependently() {
+        long group = 1002L;
+        conversations.putConversation(group, ConvType.GROUP);
+        conversations.addMember(group, ALICE);
+        messages.seed(CONV, 1, 2, 3);
+        messages.seed(group, 1, 2);
+
+        MessageService.SyncOutcome outcome = service.sync(new MessageService.SyncCommand(ALICE, List.of(
+                new MessageService.SyncCursor(CONV, 0),
+                new MessageService.SyncCursor(group, 1)), 2));
+
+        assertThat(outcome.messages()).extracting(Message::getConvId, Message::getSeq)
+                .containsExactly(tuple(CONV, 1L), tuple(CONV, 2L), tuple(group, 2L));
+        assertThat(outcome.hasMore()).as("单聊那条没补齐，整轮就没结束").isTrue();
+        assertThat(outcome.convsSynced()).isEqualTo(2);
+    }
+
+    @Test
+    @DisplayName("续传：非成员的会话游标被跳过，其余照常补齐（不回 40303 卡死整轮）")
+    void syncSkipsCursorsTheActorCannotAccess() {
+        long stranger = 7001L;
+        conversations.putConversation(stranger, ConvType.GROUP);   // 会话存在，但 ALICE 不是成员
+        messages.seed(CONV, 1, 2);
+        messages.seed(stranger, 1);
+
+        MessageService.SyncOutcome outcome = service.sync(new MessageService.SyncCommand(ALICE, List.of(
+                new MessageService.SyncCursor(stranger, 0),
+                new MessageService.SyncCursor(CONV, 0)), 10));
+
+        assertThat(outcome.skippedConvs()).containsExactly(stranger);
+        assertThat(outcome.convsSynced()).isEqualTo(1);
+        assertThat(outcome.messages()).extracting(Message::getConvId)
+                .as("被跳过的会话一条也不能下发").containsOnly(CONV);
+        assertThat(messages.listQueries).as("被跳过的会话不该去查消息表").containsExactly(CONV);
+    }
+
+    @Test
+    @DisplayName("续传：一个游标都不带 → 40001（而不是静默回一帧空结果）")
+    void syncRejectsEmptyCursors() {
+        messages.seed(CONV, 1);
+
+        assertThatThrownBy(() -> service.sync(new MessageService.SyncCommand(ALICE, List.of(), 0)))
+                .isInstanceOf(TmException.class)
+                .extracting(e -> ((TmException) e).errorCode())
+                .isEqualTo(ErrorCode.MISSING_PARAMETER);
+
+        assertThat(messages.listQueries)
+                .as("静默回空结果会让客户端以为「已经追平」，比报错难查得多")
+                .isEmpty();
+    }
+
+    @Test
+    @DisplayName("续传：负游标 → 40010（与已读上报同一个码：游标本身坏了）")
+    void syncRejectsNegativeCursor() {
+        assertThatThrownBy(() -> service.sync(new MessageService.SyncCommand(ALICE,
+                List.of(new MessageService.SyncCursor(CONV, -1)), 0)))
+                .isInstanceOf(TmException.class)
+                .hasMessageContaining("since_seq")
+                .extracting(e -> ((TmException) e).errorCode())
+                .isEqualTo(ErrorCode.INVALID_CURSOR);
+    }
+
+    @Test
+    @DisplayName("续传：同一个 conv_id 出现两次 → 40002（「按哪个游标算」没有定义，不能静默挑一个）")
+    void syncRejectsDuplicateCursor() {
+        assertThatThrownBy(() -> service.sync(new MessageService.SyncCommand(ALICE, List.of(
+                new MessageService.SyncCursor(CONV, 0),
+                new MessageService.SyncCursor(CONV, 5)), 0)))
+                .isInstanceOf(TmException.class)
+                .extracting(e -> ((TmException) e).errorCode())
+                .isEqualTo(ErrorCode.INVALID_PARAMETER);
+
+        assertThat(messages.listQueries)
+                .as("挑一个游标继续做会静默地漏消息或重复下发，宁可不做")
+                .isEmpty();
+    }
+
+    @Test
+    @DisplayName("续传：游标数超过上限 → 40002 并要求分批（否则一帧能换来上万个查询）")
+    void syncRejectsTooManyCursors() {
+        List<MessageService.SyncCursor> tooMany = new ArrayList<>();
+        for (int i = 0; i < 51; i++) {
+            tooMany.add(new MessageService.SyncCursor(9000L + i, 0));
+        }
+
+        assertThatThrownBy(() -> service.sync(new MessageService.SyncCommand(ALICE, tooMany, 0)))
+                .isInstanceOf(TmException.class)
+                .hasMessageContaining("分批")
+                .extracting(e -> ((TmException) e).errorCode())
+                .isEqualTo(ErrorCode.INVALID_PARAMETER);
+
+        assertThat(messages.listQueries).isEmpty();
+    }
+
+    @Test
+    @DisplayName("续传：conv_id 非正 → 40002")
+    void syncRejectsNonPositiveConvId() {
+        assertThatThrownBy(() -> service.sync(new MessageService.SyncCommand(ALICE,
+                List.of(new MessageService.SyncCursor(0, 0)), 0)))
+                .isInstanceOf(TmException.class)
+                .extracting(e -> ((TmException) e).errorCode())
+                .isEqualTo(ErrorCode.INVALID_PARAMETER);
+    }
+
     // ================================================================ 测试替身
     //
     // 刻意手写而不是用 Mockito：这里的断言大多是「某个副作用有没有发生」
@@ -428,11 +603,29 @@ class MessageServiceTest {
     private static final class FakeMessages implements MessageRepository {
         private final Map<String, Message> byIdemKey = new HashMap<>();
         private final List<Message> stored = new ArrayList<>();
+        /** 记录 listAfterSeq 收到的 convId 与 limit，用于断言「有没有去查」「取了多少行」。 */
+        private final List<Long> listQueries = new ArrayList<>();
+        private final List<Integer> listLimits = new ArrayList<>();
         long maxSeq;
         int insertCalls;
         private boolean failNextInsert;
         private Message idemConflict;
         private Message armedIdemHit;
+
+        /** 直接往「库里」放几条消息（按给定 seq 升序），供续传用例读。 */
+        void seed(long convId, long... seqs) {
+            for (long seq : seqs) {
+                Message m = new Message();
+                m.setId(800_000L + seq);
+                m.setConvId(convId);
+                m.setSeq(seq);
+                m.setSenderId(BOB);
+                m.setMsgType(MessageType.TEXT);
+                m.setContent("{\"text\":\"msg-" + seq + "\"}");
+                stored.add(m);
+            }
+            maxSeq = Math.max(maxSeq, seqs.length == 0 ? 0 : seqs[seqs.length - 1]);
+        }
 
         void failNextInsertWithPrimaryKey() {
             failNextInsert = true;
@@ -500,7 +693,14 @@ class MessageServiceTest {
 
         @Override
         public List<Message> listAfterSeq(long convId, long sinceSeq, int limit) {
-            return stored.stream().filter(m -> m.getSeq() > sinceSeq).limit(limit).toList();
+            listQueries.add(convId);
+            listLimits.add(limit);
+            // 与真实实现同语义：带上 convId 过滤（分片键）+ 按 seq 升序 + limit。
+            return stored.stream()
+                    .filter(m -> m.getConvId() == convId && m.getSeq() > sinceSeq)
+                    .sorted(Comparator.comparingLong(Message::getSeq))
+                    .limit(limit)
+                    .toList();
         }
 
         @Override

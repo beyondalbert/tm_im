@@ -1,5 +1,6 @@
 package com.tm.im.channel.server;
 
+import com.tm.im.channel.codec.MessageMapper;
 import com.tm.im.channel.codec.WsBinaryFrameDecoder;
 import com.tm.im.channel.codec.WsBinaryFrameEncoder;
 import com.tm.im.channel.config.NettyProperties;
@@ -61,6 +62,7 @@ public class ChannelPipelineInitializer extends ChannelInitializer<SocketChannel
     private final ConnectionLimiter limiter;
     private final MessageCommandPort messages;
     private final ZoneId databaseZone;
+    private final MessageMapper messageMapper;
 
     /**
      * @param messages     业务命令的调用面（{@code MessageService}）。
@@ -68,6 +70,7 @@ public class ChannelPipelineInitializer extends ChannelInitializer<SocketChannel
      *                     不该被“消息服务需要七个依赖”这件事拖住——
      *                     见 {@link MessageCommandPort} 的注释。
      * @param databaseZone 回执里 {@code created_at_ms} 的换算时区（{@code tm.time.zone}）
+     * @param messageMapper 续传帧里的领域消息 → 传输消息（与推送帧同一份翻译）
      */
     public ChannelPipelineInitializer(NettyProperties properties,
                                       IdentityService identityService,
@@ -75,7 +78,8 @@ public class ChannelPipelineInitializer extends ChannelInitializer<SocketChannel
                                       ThreadPoolExecutor businessExecutor,
                                       ConnectionLimiter limiter,
                                       MessageCommandPort messages,
-                                      ZoneId databaseZone) {
+                                      ZoneId databaseZone,
+                                      MessageMapper messageMapper) {
         this.properties = properties;
         this.identityService = identityService;
         this.registry = registry;
@@ -83,6 +87,7 @@ public class ChannelPipelineInitializer extends ChannelInitializer<SocketChannel
         this.limiter = limiter;
         this.messages = messages;
         this.databaseZone = databaseZone;
+        this.messageMapper = messageMapper;
     }
 
     @Override
@@ -159,6 +164,6 @@ public class ChannelPipelineInitializer extends ChannelInitializer<SocketChannel
                 identityService, registry, businessExecutor,
                 properties.getAuthTimeoutMs(), properties.getHeartbeatIdleSeconds()));
         pipeline.add("heartbeat", new HeartbeatHandler());
-        pipeline.add("business", new BusinessHandler(messages, businessExecutor, databaseZone));
+        pipeline.add("business", new BusinessHandler(messages, businessExecutor, databaseZone, messageMapper));
     }
 }

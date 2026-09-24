@@ -35,6 +35,11 @@ public interface MessageRepository {
      *
      * <p>断点续传（SYNC）与历史消息都走它。因为主键是 {@code (conv_id, seq)}，
      * 这个查询是聚簇索引上的范围扫描，不需要额外排序。
+     *
+     * <p><b>调用方传 {@code limit + 1} 是预期的用法</b>：多取的那一行不发给客户端，
+     * 只用于回答「还有没有更多」。否则调用方要先查 {@link #maxSeq} 再比大小——
+     * 多一次查询，而且两次之间新插入的消息会让判断出错（无法复现的“多一轮拉取”）。
+     * 因此实现不能自作主张地把 {@code limit} 改小。
      */
     List<Message> listAfterSeq(long convId, long sinceSeq, int limit);
 

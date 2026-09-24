@@ -145,10 +145,29 @@ MUTATIONS = [
                                 "CMD_SYNC      = 14;  // S→C 断点续传拉取"),
         ["标为"],
     ),
+    (
+        "手写客户端字典缺一个命令字",
+        "06-no-sdk-guide.md 的 CMD 字典里删掉 SYNC_RESP（16）：接照文档实现的客户端"
+        "会把续传响应当成“未知帧”，而文档里其它地方都在引用这个命令字",
+        "docs/integration/06-no-sdk-guide.md",
+        lambda t: _replace_once(t, '"SYNC": 14, "SYNC_END": 15, "SYNC_RESP": 16,',
+                                '"SYNC": 14, "SYNC_END": 15,'),
+        ["CMD 字典缺少 SYNC_RESP"],
+    ),
+    (
+        "文档引用一个不存在的用例",
+        "04-realtime.md 里把“钉住这条规则的用例”改成不存在的名字："
+        "引用漂移的后果比没引用更坏——读者以为“有测试盯着”，于是放心改",
+        REALTIME_MD,
+        lambda t: _replace_once(t, "`MessageServiceTest.syncClampsPageSize`",
+                                "`MessageServiceTest.syncClampsPageSizeV2`"),
+        ["引用了 MessageServiceTest.syncClampsPageSizeV2"],
+    ),
 ]
 
 # 仓库里这些文件必须自始至终不变（脚本只读它们）
-READONLY_IN_REPO = ["proto/transport.proto", REALTIME_MD, "docs/DESIGN.md", FRAMES_JAVA]
+READONLY_IN_REPO = ["proto/transport.proto", REALTIME_MD, "docs/DESIGN.md", FRAMES_JAVA,
+                   "docs/integration/06-no-sdk-guide.md"]
 
 
 def sha(path: Path) -> str:
