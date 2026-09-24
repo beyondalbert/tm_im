@@ -1,0 +1,35 @@
+# ============================================================================
+# 统一换行符为 LF
+#
+# 为什么必须统一：
+#   本仓库的生成器与校验器做的是**字节级比对**（例如 gen_schema --check 判断
+#   deploy/sql/01-schema.sql 是否与生成器输出一致，verify_integration_docs
+#   校验文档中的 hex 样本）。CRLF 与 LF 混用会让这些判断在不同机器上
+#   得出不同结果 —— 同一份代码在 Linux CI 上通过、在 Windows 上失败。
+#
+#   这类问题排查成本极高，因为它只在换行符差异上触发，diff 里又看不出来。
+# ============================================================================
+* text=auto eol=lf
+
+# 二进制文件不做任何转换
+*.jar    binary
+*.exe    binary
+*.dll    binary
+*.so     binary
+*.class  binary
+*.png    binary
+*.jpg    binary
+*.jpeg   binary
+*.gif    binary
+*.ico    binary
+*.webp   binary
+*.woff   binary
+*.woff2  binary
+*.ttf    binary
+*.pdf    binary
+*.zip    binary
+*.gz     binary
+
+# Windows 批处理必须是 CRLF，否则 cmd.exe 解析异常
+*.bat    text eol=crlf
+*.cmd    text eol=crlf
