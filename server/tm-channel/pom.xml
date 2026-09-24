@@ -1,0 +1,76 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<project xmlns="http://maven.apache.org/POM/4.0.0"
+         xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+         xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 https://maven.apache.org/xsd/maven-4.0.0.xsd">
+  <modelVersion>4.0.0</modelVersion>
+
+  <parent>
+    <groupId>com.tm.im</groupId>
+    <artifactId>tm-im-parent</artifactId>
+    <version>1.0.0-SNAPSHOT</version>
+  </parent>
+
+  <artifactId>tm-channel</artifactId>
+  <name>tm-channel</name>
+  <description>★ 自研 Netty 长连接：编解码、鉴权、连接注册表、推送</description>
+
+  <dependencies>
+    <dependency>
+      <groupId>com.tm.im</groupId>
+      <artifactId>tm-core</artifactId>
+    </dependency>
+
+    <!-- 不写 <version>：由 Spring Boot BOM 决定 = 4.1.135.Final。
+         写 4.2.x 会与 BOM 传递来的 4.1.x 同 JVM 并存 → NoSuchMethodError -->
+    <dependency>
+      <groupId>io.netty</groupId>
+      <artifactId>netty-all</artifactId>
+    </dependency>
+
+    <dependency>
+      <groupId>com.google.protobuf</groupId>
+      <artifactId>protobuf-java</artifactId>
+    </dependency>
+
+    <dependency>
+      <groupId>org.springframework.boot</groupId>
+      <artifactId>spring-boot-starter</artifactId>
+    </dependency>
+
+    <dependency>
+      <groupId>org.springframework.boot</groupId>
+      <artifactId>spring-boot-starter-test</artifactId>
+      <scope>test</scope>
+    </dependency>
+  </dependencies>
+
+  <build>
+    <extensions>
+      <!-- 提供 ${os.detected.classifier}，protoc 二进制必须按平台下载（Windows/Linux/macOS 各异） -->
+      <extension>
+        <groupId>kr.motd.maven</groupId>
+        <artifactId>os-maven-plugin</artifactId>
+        <version>${os-maven-plugin.version}</version>
+      </extension>
+    </extensions>
+    <plugins>
+      <plugin>
+        <groupId>org.xolstice.maven.plugins</groupId>
+        <artifactId>protobuf-maven-plugin</artifactId>
+        <executions>
+          <execution>
+            <id>gen-protobuf-java</id>
+            <goals>
+              <goal>compile</goal>
+            </goals>
+            <configuration>
+              <!-- 协议单一真源在仓库根的 proto/，由接入文档与多语言 SDK 共用，
+                   不复制到模块内，避免两份定义漂移 -->
+              <protoSourceRoot>${project.basedir}/../../proto</protoSourceRoot>
+            </configuration>
+          </execution>
+        </executions>
+      </plugin>
+    </plugins>
+  </build>
+</project>

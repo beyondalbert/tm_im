@@ -1,0 +1,44 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<project xmlns="http://maven.apache.org/POM/4.0.0"
+         xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+         xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 https://maven.apache.org/xsd/maven-4.0.0.xsd">
+  <modelVersion>4.0.0</modelVersion>
+
+  <parent>
+    <groupId>com.tm.im</groupId>
+    <artifactId>tm-im-parent</artifactId>
+    <version>1.0.0-SNAPSHOT</version>
+  </parent>
+
+  <artifactId>tm-domain</artifactId>
+  <name>tm-domain</name>
+  <description>领域实体 + 仓储接口（★对等模型所在）。不含任何持久化/框架细节</description>
+
+  <dependencies>
+    <dependency>
+      <groupId>com.tm.im</groupId>
+      <artifactId>tm-common</artifactId>
+    </dependency>
+
+    <!--
+      刻意的取舍：领域实体上带了 MyBatis-Plus 注解（@TableName/@TableId/@EnumValue）。
+
+      纯正的做法是 tm-domain 放纯净领域模型、tm-storage 另写一套 *DO +
+      转换器，代价是每张表两套类、一堆手写映射——而映射代码本身就是
+      新的漂移源，而且它不会报错，只会静默丢字段。
+
+      这里依赖的是 mybatis-plus-annotation：一个不含任何实现的纯注解包，
+      不会把 MyBatis-Plus 的运行时拉进领域层，也不会影响领域逻辑的可测性。
+    -->
+    <dependency>
+      <groupId>com.baomidou</groupId>
+      <artifactId>mybatis-plus-annotation</artifactId>
+    </dependency>
+
+    <dependency>
+      <groupId>org.springframework.boot</groupId>
+      <artifactId>spring-boot-starter-test</artifactId>
+      <scope>test</scope>
+    </dependency>
+  </dependencies>
+</project>

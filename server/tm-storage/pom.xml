@@ -1,0 +1,52 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<project xmlns="http://maven.apache.org/POM/4.0.0"
+         xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+         xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 https://maven.apache.org/xsd/maven-4.0.0.xsd">
+  <modelVersion>4.0.0</modelVersion>
+
+  <parent>
+    <groupId>com.tm.im</groupId>
+    <artifactId>tm-im-parent</artifactId>
+    <version>1.0.0-SNAPSHOT</version>
+  </parent>
+
+  <artifactId>tm-storage</artifactId>
+  <name>tm-storage</name>
+  <description>MyBatis-Plus 仓储实现 + ShardingSphere 分片接入</description>
+
+  <dependencies>
+    <dependency>
+      <groupId>com.tm.im</groupId>
+      <artifactId>tm-domain</artifactId>
+    </dependency>
+
+    <dependency>
+      <groupId>com.baomidou</groupId>
+      <artifactId>mybatis-plus-spring-boot3-starter</artifactId>
+    </dependency>
+
+    <!-- ShardingSphere 以 JDBC 驱动方式接入（不是 Starter，见 DESIGN §3.3 陷阱 2） -->
+    <dependency>
+      <groupId>org.apache.shardingsphere</groupId>
+      <artifactId>shardingsphere-jdbc</artifactId>
+    </dependency>
+    <!-- 生产用 file:/etc/tm/sharding.yaml 时必须显式引入，否则启动报无法加载配置 -->
+    <dependency>
+      <groupId>org.apache.shardingsphere</groupId>
+      <artifactId>shardingsphere-infra-url-absolutepath</artifactId>
+    </dependency>
+
+    <!-- 版本由 Spring Boot BOM 管理 -->
+    <dependency>
+      <groupId>com.mysql</groupId>
+      <artifactId>mysql-connector-j</artifactId>
+      <scope>runtime</scope>
+    </dependency>
+
+    <dependency>
+      <groupId>org.springframework.boot</groupId>
+      <artifactId>spring-boot-starter-test</artifactId>
+      <scope>test</scope>
+    </dependency>
+  </dependencies>
+</project>
