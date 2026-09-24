@@ -1,11 +1,13 @@
 """
 接入文档全量校验器。
 
-校验四件事，任何一项失败都会让接入方踩坑：
+校验五件事，任何一项失败都会让接入方踩坑：
   1. 文档中所有 hex 字节块能正确解码，且与 protobuf 官方编码一致
   2. 文档中「手写 protobuf 实现」的代码能被真实抽取并运行通过断言
   3. 文档中所有 JSON 代码块语法合法
   4. 文档间内部链接都存在
+  5. 命令字契约：proto/transport.proto ↔ 04-realtime.md §2.1 ↔ 服务端 Frames 三方一致，
+     且「一个命令字只有一种方向与一种载荷」
 
 运行：
   uv run --with protobuf python tools/verify_integration_docs.py
@@ -96,6 +98,25 @@ def check_hex_blocks():
                        content_json='{"text":"收到，今天北京晴"}',
                        created_at_ms=1767225600456)).SerializeToString())
     expected["PUSH"] = push.SerializeToString()
+
+    # §4.5 / §4.6：协议修正后的续传两帧。第一条消息与 PUSH 里那条完全相同，
+    # 所以两份样本能互相印证「推送」与「续传」送的是同一条消息。
+    sync_resp = T.Frame(cmd=T.Frame.CMD_SYNC_RESP, req_id=3,
+                        payload=T.SyncResponse(messages=[
+                            T.Message(message_id=730000000000000002, conv_id=1001, seq=8,
+                                      sender_id=2002, msg_type=T.MSG_TYPE_TEXT,
+                                      content_json='{"text":"收到，今天北京晴"}',
+                                      created_at_ms=1767225600456),
+                            T.Message(message_id=730000000000000003, conv_id=1001, seq=9,
+                                      sender_id=1001, msg_type=T.MSG_TYPE_TEXT,
+                                      content_json='{"text":"明天见"}',
+                                      created_at_ms=1767225600789),
+                        ], has_more=False, truncated=False).SerializeToString())
+    expected["SYNC_RESP"] = sync_resp.SerializeToString()
+
+    sync_end = T.Frame(cmd=T.Frame.CMD_SYNC_END, req_id=3,
+                       payload=T.SyncEnd(ok=True, message="", conv_synced=2).SerializeToString())
+    expected["SYNC_END"] = sync_end.SerializeToString()
 
     by_hex = {v.hex(): k for k, v in expected.items()}
     for k, v in expected.items():
@@ -364,11 +385,276 @@ def check_links():
         ok("README.md 链接校验完成")
 
 
+# ============================================================
+# 5. 命令字契约：proto ↔ 文档 ↔ 服务端代码三方一致
+# ============================================================
+# 这一节是被一个真缺陷遍出来的：CMD_SYNC(14) 曾经同时充当请求与响应，
+# 于是同一个编号在两个方向上挂着两种载荷，接收方无法判断手上这帧的语义，
+# 而 protobuf 又不会报错（字段号近似时两种都能解出来）。
+# 修正动作本身（新增 CMD_SYNC_RESP=16）只发生三处：proto、本篇文档、服务端 Frames。
+# 三处都是手写的，所以必须有东西盯着它们。
+
+PROTO_CMD_RE = re.compile(
+    r"^\s*(CMD_[A-Z0-9_]+)\s*=\s*(\d+);\s*//\s*"
+    r"(C→S|S→C|双向|-)\s+payload\s*=\s*([A-Za-z0-9_]+|-)\s*(.*)$")
+DOC_ROW_RE = re.compile(
+    r"^\|\s*(\d+)\s*\|\s*`(CMD_[A-Z0-9_]+)`\s*\|\s*([^|]*?)\s*\|\s*([^|]*?)\s*\|\s*([^|]*?)\s*\|\s*$")
+JAVA_PAYLOAD_RE = re.compile(r"case\s+([A-Z0-9_,\s]+?)\s*->\s*(\w+)\.class\s*;")
+JAVA_NULL_RE = re.compile(r"case\s+([A-Z0-9_,\s]+?)\s*->\s*null\s*;")
+JAVA_DIR_RE = re.compile(r"case\s+([A-Z0-9_,\s]+?)\s*->\s*Direction\.(\w+)\s*;")
+DOC_INLINE_RE = re.compile(r"`(CMD_[A-Z0-9_]+)`\s*=\s*\*?\*?(\d+)")
+DOC_FRAME_CMD_RE = re.compile(r"cmd:\s*(\d+)[^\n]*?//\s*(CMD_[A-Z0-9_]+)")
+DESIGN_SNIPPET_RE = re.compile(r"^\s*(CMD_[A-Z0-9_]+)\s*=\s*(\d+);\s*(?://\s*(C→S|S→C|双向|-))?")
+
+FRAMES_JAVA = os.path.join(ROOT, "server", "tm-channel", "src", "main", "java",
+                           "com", "tm", "im", "channel", "codec", "Frames.java")
+
+
+def _java_switch_body(txt, marker):
+    """取 marker 所在方法的花括号体（用于把解析范围限在目标 switch 里）。"""
+    start = txt.find(marker)
+    if start < 0:
+        fail("Frames.java 里找不到 {}：命令字契约的代码侧来源缺失".format(marker))
+        return ""
+    i = txt.find("{", start)
+    depth = 0
+    for j in range(i, len(txt)):
+        if txt[j] == "{":
+            depth += 1
+        elif txt[j] == "}":
+            depth -= 1
+            if depth == 0:
+                return txt[i:j + 1]
+    fail("Frames.java 的方法体无法配对花括号: " + marker)
+    return ""
+
+
+def _java_cases(body):
+    """把 ``case A, B -> X;`` 拆成 {名称: X}，重复声明直接报错。"""
+    found = {}
+
+    def put(name, value):
+        if name in found and found[name] != value:
+            fail("Frames.java 里 {} 被声明了两种结果：{} 与 {}".format(name, found[name], value))
+        found[name] = value
+
+    for names, value in JAVA_PAYLOAD_RE.findall(body):
+        for n in names.replace("\n", " ").split(","):
+            if n.strip():
+                put(n.strip(), value)
+    for names in JAVA_NULL_RE.findall(body):
+        for n in names.replace("\n", " ").split(","):
+            if n.strip():
+                put(n.strip(), None)
+    return found
+
+
+def parse_proto_cmds():
+    txt = read(os.path.join(PROTO_DIR, "transport.proto"))
+    start = txt.find("enum Cmd {")
+    if start < 0:
+        fail("proto/transport.proto 里找不到 enum Cmd")
+        return {}
+    cmds = {}
+    for line in txt[start:].splitlines()[1:]:
+        stripped = line.strip()
+        if stripped == "}":
+            break
+        if not stripped or stripped.startswith("//"):
+            continue
+        m = PROTO_CMD_RE.match(line)
+        if not m:
+            fail("proto 命令字行格式不合规（应为 `CMD_X = N; // <方向> payload = <消息|-> 说明`）: "
+                 + stripped[:80])
+            continue
+        name, num, direction, payload, desc = m.groups()
+        cmds[name] = {"num": int(num), "dir": direction,
+                      "payload": None if payload == "-" else payload, "desc": desc.strip()}
+    if not cmds:
+        fail("proto 里没有解出任何命令字")
+    return cmds
+
+
+def parse_doc_table():
+    txt = read(os.path.join(DOCS, "04-realtime.md"))
+    start = txt.find("### 2.1 命令字表")
+    if start < 0:
+        fail("04-realtime.md 里找不到 §2.1 命令字表")
+        return {}
+    rows = {}
+    for line in txt[start:].splitlines():
+        if line.startswith("### ") and "2.1" not in line:
+            break
+        if not line.startswith("|"):
+            continue
+        m = DOC_ROW_RE.match(line)
+        if not m:
+            continue
+        num, name, direction, payload, desc = m.groups()
+        if direction not in ("C→S", "S→C", "双向", "—"):
+            fail("§2.1 {} 的方向列 `{}` 不是 C→S/S→C/双向/—".format(name, direction))
+        p = payload
+        if p.startswith("`") and p.endswith("`"):
+            p = p[1:-1]
+        elif p != "—":
+            fail("§2.1 {} 的 payload 列 `{}` 应为 `消息名` 或 —".format(name, payload))
+            p = None
+        else:
+            p = None
+        rows[name] = {"num": int(num), "dir": "-" if direction == "—" else direction,
+                      "payload": p, "desc": desc}
+    if not rows:
+        fail("§2.1 命令字表里没有解出任何一行")
+    return rows
+
+
+def parse_java_frames():
+    txt = read(FRAMES_JAVA)
+    payload_cases = _java_cases(_java_switch_body(
+        txt, "private static Class<? extends MessageLite> expectedBodyType"))
+    dir_body = _java_switch_body(txt, "public static Direction direction")
+    dirs = {}
+    for names, direction in JAVA_DIR_RE.findall(dir_body):
+        for n in names.replace("\n", " ").split(","):
+            n = n.strip()
+            if not n:
+                continue
+            if n in dirs and dirs[n] != direction:
+                fail("Frames.direction 里 {} 被声明了两个方向：{} 与 {}".format(
+                    n, dirs[n], direction))
+            dirs[n] = direction
+    return payload_cases, dirs
+
+
+JAVA_DIR_TO_PROTO = {
+    "CLIENT_TO_SERVER": "C→S",
+    "SERVER_TO_CLIENT": "S→C",
+    "BOTH": "双向",
+    "NONE": "-",
+}
+PROTO_DIR_TO_JAVA = {v: k for k, v in JAVA_DIR_TO_PROTO.items()}
+
+
+def check_command_contract():
+    print("\n" + "=" * 74)
+    print("5. 命令字契约：proto ↔ 文档 ↔ 服务端代码")
+    print("=" * 74)
+
+    proto = parse_proto_cmds()
+    doc = parse_doc_table()
+    java_payload, java_dir = parse_java_frames()
+    if not (proto and doc and java_payload and java_dir):
+        return
+
+    # ---- 不变量 1&2：编号与载荷各自唯一 ----
+    # 方向不是「唯一」而是「只能有一个」：一个命令字不能同时挂在两个方向上
+    # （那正是 CMD_SYNC 的错），但这个检查由「集合对比」与 _java_cases 的重复检测完成。
+    for key in ("num", "payload"):
+        seen = {}
+        for name, spec in sorted(proto.items()):
+            v = spec[key]
+            if v is None:
+                continue
+            if v in seen:
+                what = {"num": "编号", "payload": "载荷类型", "dir": "方向"}[key]
+                fail("proto {} {} 被两个命令字共用：{} 与 {}".format(what, v, seen[v], name))
+            seen[v] = name
+    if proto.get("CMD_UNKNOWN", {}).get("dir") != "-":
+        fail("CMD_UNKNOWN 必须是保留值（方向 -）")
+    if proto.get("CMD_SYNC", {}).get("dir") != "C→S" or \
+            proto.get("CMD_SYNC_RESP", {}).get("dir") != "S→C":
+        fail("CMD_SYNC 必须只做请求（C→S），响应只归 CMD_SYNC_RESP（S→C）")
+
+    # ---- 三方对比 ----
+    def triple(tag):
+        return "{}: proto={} 文档={} 服务端={}".format(tag, proto.get(tag), doc.get(tag), java_dir.get(tag))
+
+    if set(proto) != set(doc):
+        fail("命令字集合不一致：仅在 proto {}；仅在 §2.1 文档 {}".format(
+            sorted(set(proto) - set(doc)), sorted(set(doc) - set(proto))))
+    for name in sorted(set(proto) & set(doc)):
+        p, d = proto[name], doc[name]
+        if p["num"] != d["num"]:
+            fail("{} 编号不一致：proto={} 文档={}".format(name, p["num"], d["num"]))
+        if p["dir"] != d["dir"]:
+            fail("{} 方向不一致：proto={} 文档={}".format(name, p["dir"], d["dir"]))
+        if p["payload"] != d["payload"]:
+            fail("{} 载荷不一致：proto={} 文档={}".format(name, p["payload"], d["payload"]))
+        if java_payload.get(name) != p["payload"]:
+            fail("{} 载荷与 Frames.java 不一致：proto={} Java={}".format(
+                name, p["payload"], java_payload.get(name)))
+        if java_dir.get(name) != PROTO_DIR_TO_JAVA[p["dir"]]:
+            fail("{} 方向与 Frames.direction 不一致：proto={} Java={}".format(
+                name, p["dir"], java_dir.get(name)))
+    ok("{} 个命令字：编号/方向/载荷在 proto、§2.1、Frames 之间完全一致".format(len(proto)))
+
+    # ---- Frames 不得漏掉（也不得多出）任何命令字 ----
+    # UNRECOGNIZED 是 protobuf-java 为未知枚举值合成的，proto 里没有对应行。
+    java_expected = set(proto) | {"UNRECOGNIZED"}
+    if set(java_payload) != java_expected:
+        fail("Frames.expectedBodyType 覆盖不全：仅在 proto {}".format(
+            sorted(java_expected - set(java_payload))))
+    if set(java_dir) != java_expected:
+        fail("Frames.direction 覆盖不全：仅在 proto {}".format(
+            sorted(java_expected - set(java_dir))))
+    ok("Frames 的载荷表与方向表覆盖了全部命令字（含 protobuf 的 UNRECOGNIZED）")
+
+    # ---- 文档正文里的编号引用 ----
+    realtime = read(os.path.join(DOCS, "04-realtime.md"))
+    refs = 0
+    for name, num in DOC_INLINE_RE.findall(realtime):
+        refs += 1
+        if name not in proto:
+            fail("04-realtime.md 引用了不存在的命令字 {}".format(name))
+        elif proto[name]["num"] != int(num):
+            fail("04-realtime.md 正文把 {} 写成 {}，应为 {}".format(
+                name, num, proto[name]["num"]))
+    for num, name in DOC_FRAME_CMD_RE.findall(realtime):
+        refs += 1
+        if name not in proto:
+            fail("04-realtime.md 的帧示例引用了不存在的命令字 {}".format(name))
+        elif proto[name]["num"] != int(num):
+            fail("04-realtime.md 的帧示例 `cmd: {}` 与 {} 的编号 {} 不符".format(
+                num, name, proto[name]["num"]))
+    ok("校验文档正文中 {} 处命令字编号引用".format(refs))
+
+    # ---- DESIGN §7.5 的命令字总览（它曾经漏过 SYNC/ERROR 两个） ----
+    design = read(os.path.join(ROOT, "docs", "DESIGN.md"))
+    start = design.find("### 7.5 协议帧")
+    end = design.find("### 7.6", start)
+    if start < 0 or end < 0:
+        fail("DESIGN.md 里找不到 §7.5 命令字总览")
+        return
+    listed = 0
+    for line in design[start:end].splitlines():
+        m = DESIGN_SNIPPET_RE.match(line)
+        if not m or "=" not in line:
+            continue
+        name, num, direction = m.groups()
+        if name == "syntax":
+            continue
+        listed += 1
+        if name not in proto:
+            fail("DESIGN.md §7.5 列出了 proto 里不存在的命令字 {}".format(name))
+            continue
+        if proto[name]["num"] != int(num):
+            fail("DESIGN.md §7.5 把 {} 写成 {}，proto 是 {}".format(
+                name, num, proto[name]["num"]))
+        if direction and proto[name]["dir"] != direction:
+            fail("DESIGN.md §7.5 把 {} 标为 {}，proto 是 {}".format(
+                name, direction, proto[name]["dir"]))
+    if listed != len(proto):
+        fail("DESIGN.md §7.5 只列了 {} 个命令字，proto 里有 {} 个（总览漏项会让人以为它不存在）"
+             .format(listed, len(proto)))
+    ok("DESIGN.md §7.5 总览包含全部 {} 个命令字，编号与方向一致".format(listed))
+
+
 def main():
     out = check_hex_blocks()
     check_handwritten_proto(out)
     check_json_blocks()
     check_links()
+    check_command_contract()
     shutil.rmtree(out, ignore_errors=True)
 
     print("\n" + "=" * 74)

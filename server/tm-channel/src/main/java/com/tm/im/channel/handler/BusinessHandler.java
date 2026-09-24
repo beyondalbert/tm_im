@@ -28,16 +28,21 @@ import java.util.concurrent.ThreadPoolExecutor;
  * 任何在这里直接查库的写法都会让一条慢查询拖住该 EventLoop 上的<b>所有</b>连接——
  * 这正是 §7.3 那条铁律要禁止的事。{@link AuthHandler} 的类注释里有同一条理由。
  *
- * <p><b>还没接上的命令：{@code CMD_SYNC}</b>。它回的是 50000（内部错误，可重试）
- * 而<b>不是静默忽略</b>：静默忽略会让客户端一直等 ACK，最终表现为
- * 「消息发出去没反应」这种最难排查的现象——看起来像丢包，实际是服务端根本没打算回。
- * 之所以还没接上：协议里 {@code CMD_SYNC} 一个命令字同时被用在两个方向上
- * （请求载荷 {@code SyncRequest}、响应载荷 {@code SyncResponse}），
- * 而 {@link Frames#body} 的「命令字 ↔ 载荷类型」唯一对应表正是为了禁止这种歧义存在的
- * （同一对端口上，接收方无法区分自己收到的是请求还是响应）。
- * 正确的修法是给响应一个独立的命令字（例如 {@code CMD_SYNC_RESP}），
- * 这要同时改 {@code proto/transport.proto} 与 {@code docs/integration/04-realtime.md}，
- * 因此单独一步做，而不是在这里偷偷绕过去。
+ * <p><b>不再存在的协议歧义：{@code CMD_SYNC}</b>。它曾同时被用作请求
+ * （{@code SyncRequest}）与响应（{@code SyncResponse}），而 {@link Frames#body}
+ * 的「命令字 ↔ 载荷类型」唯一对应表正是为了禁止这种歧义存在的（同一对端口上，
+ * 接收方无法区分自己收到的是请求还是响应）。现已给响应独立编号
+ * {@code CMD_SYNC_RESP(16)}（proto 与 04-realtime.md §2.3 已同步）。
+ *
+ * <p><b>{@code CMD_SYNC} 目前回 50000</b>（内部错误，可重试）而<b>不是静默忽略</b>：
+ * 静默忽略会让客户端一直等 ACK，最终表现为「消息发出去没反应」这种最难排查的现象——
+ * 看起来像丢包，实际是服务端根本没打算回。它回 50000 的原因是<b>服务端读取路径还没实现</b>
+ * （按 seq 拉消息的仓储与分页），这是下一步的事，与协议无关了。
+ *
+ * <p><b>方向门禁</b>：协议里有一部分命令只由服务端发出（{@code CMD_PUSH}、
+ * {@code CMD_SYNC_RESP}、{@code CMD_SEND_ACK}…）。它们如果从客户端发来，
+ * 属于客户端实现错误（最常见的成因是把收到的响应原样回显），这里会明确说清
+ * 是哪一类错——而不是落进 {@code default} 分支被笼统地当成「未知命令」。
  *
  * <p><b>错误映射只有一处</b>：{@link TmException} 携带的错误码原样回给客户端，
  * 其余异常一律 50000 并记 ERROR 日志。REST 侧有另一个同样职责的处理器，
@@ -71,6 +76,18 @@ public class BusinessHandler extends SimpleChannelInboundHandler<Frame> {
         TmSession session = ChannelAttributes.session(ctx.channel());
         boolean authenticated = session != null;
 
+        // 方向门禁必须在分发之前：服务端专用命令（PUSH/SYNC_RESP/SEND_ACK…）从客户端发来
+        // 是「客户端把响应当请求回显」这类实现错误，混在 default 分支里只能得到
+        // 「unsupported cmd」——那句话会把排查方向指向「服务端不认识这个命令」，正好指反。
+        Frames.Direction direction = Frames.direction(frame.getCmd());
+        if (!direction.fromClient()) {
+            respond(ctx, frame.getReqId(), ErrorCode.BAD_REQUEST,
+                    direction == Frames.Direction.SERVER_TO_CLIENT
+                            ? frame.getCmd() + " 是服务端专用命令，客户端不得发送（04-realtime.md §2.1）"
+                            : "unsupported cmd: " + frame.getCmdValue());
+            return;
+        }
+
         switch (frame.getCmd()) {
             case CMD_AUTH -> {
                 // 到达这里说明已经处于 READY：重复 AUTH 属于客户端协议实现问题。
@@ -99,7 +116,9 @@ public class BusinessHandler extends SimpleChannelInboundHandler<Frame> {
                             "authentication not completed");
                     return;
                 }
-                log.warn("收到尚未实现的命令 cmd=SYNC actorId={} —— 见本类注释里的协议歧义说明",
+                // 协议歧义已修（响应改用 CMD_SYNC_RESP，见类注释与 04-realtime.md §2.3），
+                // 这里缺的是服务端实现：按 (conv_id, seq) 分页读消息的仓储。
+                log.warn("收到尚未实现的命令 cmd=SYNC actorId={} —— 协议已定稿，缺服务端读取路径",
                         session.actorId());
                 respond(ctx, frame.getReqId(), ErrorCode.INTERNAL_ERROR,
                         "command not implemented yet: CMD_SYNC");
@@ -110,9 +129,12 @@ public class BusinessHandler extends SimpleChannelInboundHandler<Frame> {
                 log.debug("心跳帧到达分发层（异常路径）cmd={}", frame.getCmd());
             }
             default -> {
-                // CMD_UNKNOWN（0，保留值）与客户端自造的非法命令字。
-                respond(ctx, frame.getReqId(), ErrorCode.BAD_REQUEST,
-                        "unsupported cmd: " + frame.getCmdValue());
+                // 走到这里说明该命令字在 Frames.direction 里被声明为「客户端可发」，
+                // 但这里没有对应分支 —— 这是服务端自己的疏漏（新加命令字时漏改分发），
+                // 属于 5xx，不是客户端错误。用 40000 会是撒谎，用静默会是灾难。
+                log.error("命令 {} 已声明客户端可发，但分发未实现", frame.getCmd());
+                respond(ctx, frame.getReqId(), ErrorCode.INTERNAL_ERROR,
+                        "command allowed from client but not dispatched: " + frame.getCmd());
             }
         }
     }

@@ -30,25 +30,41 @@ message Frame {
   uint64 req_id  = 2;  // 请求序号（客户端自增），用于请求-响应关联；服务端主动推送时为 0
   bytes  payload = 3;  // 按 cmd 对应的消息序列化后的字节
 
+  // ----------------------------------------------------------
+  // 命令字。
+  //
+  // 三条不变量（完整说明见接入文档 04-realtime.md §2.3，
+  // tools/verify_integration_docs.py 的第 5 节逐条机器校验）：
+  //   1. 一个命令字只属于一个方向：C→S、S→C、双向，或 -（保留值，不用于任何方向）。
+  //      「请求与响应共用同一个命令字」会让接收方无法判断手里这帧是什么——
+  //      CMD_SYNC 曾经就是这样，修正见下方 CMD_SYNC_RESP。
+  //   2. 一个命令字只对应一种载荷类型，且一种载荷类型只挂在一个命令字上。
+  //      payload 是 bytes，类型信息完全由 cmd 决定，没有第二条线索。
+  //   3. 编号只增不改：一旦出现在对外文档里，这个值的含义就不再变。
+  //
+  // 每行的格式是机器可解析的，必须严格保持（方向 ∈ {C→S, S→C, 双向, -}）：
+  //   CMD_XXX = <编号>; // <方向> payload = <消息名|-> <说明>
+  // ----------------------------------------------------------
   enum Cmd {
     // ---- 握手与保活 ----
-    CMD_UNKNOWN = 0;
-    CMD_AUTH    = 1;   // C→S  鉴权请求          payload = AuthRequest
-    CMD_AUTH_OK = 2;   // S→C  鉴权成功          payload = AuthResponse
-    CMD_PING    = 3;   // 双向 心跳              payload = 空
-    CMD_PONG    = 4;   // 双向 心跳应答          payload = 空
+    CMD_UNKNOWN = 0;     // -    payload = -             保留值，任何一方都不得使用
+    CMD_AUTH    = 1;     // C→S  payload = AuthRequest   鉴权请求（必须是第一帧）
+    CMD_AUTH_OK = 2;     // S→C  payload = AuthResponse  鉴权成功
+    CMD_PING    = 3;     // 双向 payload = -             心跳
+    CMD_PONG    = 4;     // 双向 payload = -             心跳应答
 
     // ---- 消息 ----
-    CMD_SEND     = 10; // C→S  发送消息          payload = SendRequest
-    CMD_SEND_ACK = 11; // S→C  发送成功回执      payload = SendAck
-    CMD_PUSH     = 12; // S→C  新消息推送        payload = PushMessage
-    CMD_READ     = 13; // C→S  已读上报          payload = ReadRequest
-    CMD_SYNC     = 14; // C→S  断点续传拉取      payload = SyncRequest
-    CMD_SYNC_END = 15; // S→C  续传结束标记      payload = SyncEnd
+    CMD_SEND      = 10;  // C→S  payload = SendRequest   发送消息
+    CMD_SEND_ACK  = 11;  // S→C  payload = SendAck       发送成功回执（含最终 seq）
+    CMD_PUSH      = 12;  // S→C  payload = PushMessage   新消息推送
+    CMD_READ      = 13;  // C→S  payload = ReadRequest   已读上报
+    CMD_SYNC      = 14;  // C→S  payload = SyncRequest   断点续传拉取
+    CMD_SYNC_END  = 15;  // S→C  payload = SyncEnd       续传整轮结束（仅在一次 CMD_SYNC 已全部补齐时发一次）
+    CMD_SYNC_RESP = 16;  // S→C  payload = SyncResponse  续传响应（一次 CMD_SYNC 恰好对应一帧）
 
     // ---- 控制 ----
-    CMD_KICK  = 20;    // S→C  强制下线          payload = KickNotice
-    CMD_ERROR = 21;    // S→C  错误（对应 req_id）payload = ErrorFrame
+    CMD_KICK  = 20;      // S→C  payload = KickNotice   强制下线
+    CMD_ERROR = 21;      // S→C  payload = ErrorFrame   错误（对应 req_id）
   }
 }
 
@@ -144,16 +160,19 @@ message SyncRequest {
   uint32 limit                = 2;  // 单会话单次返回上限，0 用服务端默认
 }
 
+// CMD_SYNC_RESP：一次 CMD_SYNC 恰好对应一帧，req_id 原样回传。
 message SyncResponse {
   repeated Message messages = 1;  // 按 (conv_id, seq) 升序
-  bool has_more             = 2;  // 为 true 时客户端应继续发送 SyncRequest
+  bool has_more             = 2;  // 为 true 时客户端应继续发送 SyncRequest（游标推进到本帧最后一条）
   bool truncated            = 3;  // 为 true 表示服务端截断（如超保留期），需走 REST 补拉
 }
 
+// CMD_SYNC_END：只在 SyncResponse.has_more == false 时紧随其后发一帧，req_id 与该请求相同。
+// has_more == true 时不得发送它——否则客户端会在还没补齐的情况下认为已经追平。
 message SyncEnd {
   bool   ok             = 1;
   string message        = 2;
-  uint32 conv_synced    = 3;  // 实际完成的会话数
+  uint32 conv_synced    = 3;  // 本次 CMD_SYNC 中已补齐的会话数
 }
 
 // ------------------------------------------------------------

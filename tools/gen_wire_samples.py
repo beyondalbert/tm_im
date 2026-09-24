@@ -122,8 +122,40 @@ def main():
     print("  十六进制:")
     print(hexdump(push_bytes))
 
-    # ---------- 5. 往返校验 ----------
-    print("\n[5] 往返校验（decode 后字段是否与发送前一致）")
+    # ---------- 5. SYNC_RESP 帧 ----------
+    # 协议修正后的续传响应（04-realtime.md §2.3：响应单独占 16）。
+    # 第一条消息与上面的 PUSH 样本完全相同，便于对照「推送」与「续传」两种到达方式。
+    msg2 = T.Message(
+        message_id=730000000000000003, conv_id=1001, seq=9, sender_id=1001,
+        msg_type=T.MSG_TYPE_TEXT,
+        content_json=json.dumps({"text": "明天见"}, ensure_ascii=False, separators=(",", ":")),
+        created_at_ms=1767225600789,
+    )
+    sync_resp = T.SyncResponse(messages=[msg, msg2], has_more=False, truncated=False)
+    sync_resp_frame = T.Frame(cmd=T.Frame.CMD_SYNC_RESP, req_id=3,
+                              payload=sync_resp.SerializeToString())
+    sync_resp_bytes = sync_resp_frame.SerializeToString()
+
+    print("\n[5] SYNC_RESP 帧 (server -> clients)")
+    print("  语义: cmd=16 (CMD_SYNC_RESP), req_id=3, 一次 CMD_SYNC 恰好对应一帧")
+    print("  messages: 2 条（conv_id=1001, seq=8 然后 9，按 seq 升序）")
+    print("  Frame total = {} bytes".format(len(sync_resp_bytes)))
+    print("  十六进制:")
+    print(hexdump(sync_resp_bytes))
+
+    # ---------- 6. SYNC_END 帧 ----------
+    sync_end = T.SyncEnd(ok=True, message="", conv_synced=2)
+    sync_end_frame = T.Frame(cmd=T.Frame.CMD_SYNC_END, req_id=3, payload=sync_end.SerializeToString())
+    sync_end_bytes = sync_end_frame.SerializeToString()
+
+    print("\n[6] SYNC_END 帧 (server -> clients)")
+    print("  语义: cmd=15 (CMD_SYNC_END), req_id=3（与上一帧相同），只在 has_more=false 时发")
+    print("  Frame total = {} bytes".format(len(sync_end_bytes)))
+    print("  十六进制:")
+    print(hexdump(sync_end_bytes))
+
+    # ---------- 7. 往返校验 ----------
+    print("\n[7] 往返校验（decode 后字段是否与发送前一致）")
     d = T.Frame()
     d.ParseFromString(send_bytes)
     assert d.cmd == T.Frame.CMD_SEND, d.cmd
@@ -134,10 +166,32 @@ def main():
     assert sr.client_msg_id == "c-7f3a9b21"
     assert sr.msg_type == T.MSG_TYPE_TEXT
     assert sr.content_json == content
-    print("  OK: cmd/req_id/conv_id/client_msg_id/msg_type/content_json 全部一致")
 
-    # ---------- 6. 原生 TCP 长度前缀 ----------
-    print("\n[6] 原生 TCP 传输：4 字节大端长度前缀")
+    # 续传两帧：命令字必须不同（14 请求 / 16 响应 / 15 结束），这是协议修正的核心
+    assert T.Frame.CMD_SYNC != T.Frame.CMD_SYNC_RESP, \
+        "请求与响应共用命令字会让接收方无法判断帧的语义"
+    sd = T.Frame()
+    sd.ParseFromString(sync_resp_bytes)
+    assert sd.cmd == T.Frame.CMD_SYNC_RESP, sd.cmd
+    assert sd.req_id == 3, sd.req_id
+    parsed_resp = T.SyncResponse()
+    parsed_resp.ParseFromString(sd.payload)
+    assert [m.seq for m in parsed_resp.messages] == [8, 9], parsed_resp.messages
+    assert parsed_resp.has_more is False
+
+    se = T.Frame()
+    se.ParseFromString(sync_end_bytes)
+    assert se.cmd == T.Frame.CMD_SYNC_END, se.cmd
+    assert se.req_id == 3, se.req_id
+    parsed_end = T.SyncEnd()
+    parsed_end.ParseFromString(se.payload)
+    assert parsed_end.ok is True
+    assert parsed_end.conv_synced == 2
+    print("  OK: cmd/req_id/conv_id/client_msg_id/msg_type/content_json 全部一致")
+    print("  OK: SYNC_RESP(16) 与 SYNC_END(15) 的命令字、req_id、消息顺序全部一致")
+
+    # ---------- 8. 原生 TCP 长度前缀 ----------
+    print("\n[8] 原生 TCP 传输：4 字节大端长度前缀")
     import struct
     framed = struct.pack(">I", len(send_bytes)) + send_bytes
     print("  length prefix = {}".format(framed[:4].hex()))

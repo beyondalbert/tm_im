@@ -46,6 +46,9 @@ class TwoClientEndToEndTest {
     // proto/transport.proto 的字段号与命令字。这里刻意全部写死成字面量，
     // 而不是引用生成的 Java 常量：一旦 proto 被改动，这个测试应当失败，
     // 而不是跟着一起改（改写的是「线上兼容性」这份对外契约）。
+    //
+    // 引用一律写消息名，不写 proto 的行号：行号会随着注释增删而失效，
+    // 而失效的行号比没有行号更坏——它会把人带到错误的定义上。
     // ------------------------------------------------------------------
     private static final int CMD_AUTH = 1;
     private static final int CMD_AUTH_OK = 2;
@@ -53,34 +56,50 @@ class TwoClientEndToEndTest {
     private static final int CMD_PONG = 4;
     private static final int CMD_SEND = 10;
     private static final int CMD_SEND_ACK = 11;
+    private static final int CMD_PUSH = 12;
     private static final int CMD_READ = 13;
     private static final int CMD_SYNC = 14;
+
+    /**
+     * 续传响应。M3 之前它是 14（与请求同号，见 04-realtime.md §2.3 的修正记录），
+     * 现在固定为 16 —— 这个字面量就是协议的锁：谁把它改回 14 或改成别的值，这里会失败。
+     */
+    private static final int CMD_SYNC_RESP = 16;
+
     private static final int CMD_KICK = 20;
     private static final int CMD_ERROR = 21;
 
-    /** Frame（transport.proto:28-31）。 */
+    /** Frame（proto: Frame）。 */
     private static final int F_CMD = 1;
     private static final int F_REQ_ID = 2;
     private static final int F_PAYLOAD = 3;
 
-    /** AuthResponse（transport.proto:88-93）。 */
+    /** AuthResponse（proto: AuthResponse）。 */
     private static final int AR_ACTOR_ID = 1;
     private static final int AR_HANDLE = 2;
     private static final int AR_ACTOR_TYPE = 3;
     private static final int AR_HEARTBEAT_SEC = 4;
 
-    /** SendAck（transport.proto:117-123）。 */
+    /** SendAck（proto: SendAck）。 */
     private static final int SA_CONV_ID = 1;
     private static final int SA_SEQ = 2;
     private static final int SA_MESSAGE_ID = 3;
     private static final int SA_CREATED_AT_MS = 4;
     private static final int SA_CLIENT_MSG_ID = 5;
 
-    /** KickNotice（transport.proto:162-166）。 */
+    /** PushMessage（proto: PushMessage）。 */
+    private static final int PM_MESSAGE = 1;
+
+    /** Message（proto: Message）—— 只用到定位一条消息所需的前三个字段。 */
+    private static final int M_MESSAGE_ID = 1;
+    private static final int M_CONV_ID = 2;
+    private static final int M_SEQ = 3;
+
+    /** KickNotice（proto: KickNotice）。 */
     private static final int KN_REASON = 1;
     private static final int KN_DETAIL = 2;
 
-    /** ErrorFrame（transport.proto:168-172）。 */
+    /** ErrorFrame（proto: ErrorFrame）。 */
     private static final int ER_CODE = 1;
     private static final int ER_MESSAGE = 2;
     private static final int ER_RETRYABLE = 3;
@@ -343,9 +362,9 @@ class TwoClientEndToEndTest {
             Map<Integer, Object> duplicate = errorFrame(alice.expectFrame("重复 AUTH"));
             assertThat(RawProto.number(duplicate, ER_CODE)).isEqualTo(ERR_BAD_REQUEST);
 
-            // CMD_SYNC：尚未实现（协议上 CMD_SYNC 同时被用作请求与响应，
-            // 需要一个独立的响应命令字才能无歧义地实现，见 BusinessHandler 注释）。
-            // 但绝不能静默 —— 静默会让客户端一直等响应，
+            // CMD_SYNC：协议歧义已经修好（响应有独立命令字 CMD_SYNC_RESP=16，
+            // 见 04-realtime.md §2.3 与本测试的另一个用例），但服务端还没有按 seq 读消息的
+            // 仓储，所以现在仍然回 50000。绝不能静默 —— 静默会让客户端一直等响应，
             // 现象是「消息发出去没反应」，看起来像丢包。
             alice.send(CMD_SYNC, 3, null);
 
@@ -363,6 +382,49 @@ class TwoClientEndToEndTest {
 
             // 连接必须还活着：一条未实现的命令不该让客户端掉线
             assertPingPong(alice, 4);
+        }
+    }
+
+    @Test
+    @DisplayName("方向门禁：服务端专用命令从客户端发来 → 40000 且说清是哪一类错误")
+    void serverOnlyCommandsAreRejectedAsClientMistakes() throws Exception {
+        try (RawClient alice = webSocket()) {
+            authenticate(alice, 1, identity.jwt(ALICE), "web-1");
+
+            // CMD_SYNC_RESP(16)：M3 之前，CMD_SYNC 一个命令字同时充当请求与响应，
+            // 于是「响应该用哪个命令字」在协议里根本没有定义（04-realtime.md §2.3）。
+            alice.send(CMD_SYNC_RESP, 2, null);
+            Map<Integer, Object> respFrame = alice.expectFrame("客户端发 CMD_SYNC_RESP");
+            assertThat(RawProto.number(respFrame, F_CMD)).isEqualTo(CMD_ERROR);
+            assertThat(RawProto.number(respFrame, F_REQ_ID)).isEqualTo(2);
+            Map<Integer, Object> respError = errorFrame(respFrame);
+            assertThat(RawProto.number(respError, ER_CODE)).isEqualTo(ERR_BAD_REQUEST);
+            assertThat(RawProto.text(respError, ER_MESSAGE))
+                    .as("必须点明「服务端专用」；含混的 unsupported cmd 会把排查方向指反")
+                    .contains("CMD_SYNC_RESP")
+                    .contains("服务端专用");
+
+            // CMD_PUSH(12)：把收到的推送原样回显，是客户端实现里很常见的一种错
+            byte[] pushPayload = RawProto.lenField(PM_MESSAGE, RawProto.concat(
+                    RawProto.varintField(M_MESSAGE_ID, 730000000000000002L),
+                    RawProto.varintField(M_CONV_ID, 1001),
+                    RawProto.varintField(M_SEQ, 8)));
+            alice.send(CMD_PUSH, 3, pushPayload);
+            Map<Integer, Object> pushError = errorFrame(alice.expectFrame("客户端发 CMD_PUSH"));
+            assertThat(RawProto.number(pushError, ER_CODE)).isEqualTo(ERR_BAD_REQUEST);
+            assertThat(RawProto.text(pushError, ER_MESSAGE)).contains("CMD_PUSH");
+
+            // 自造的编号是另一类错（协议里不存在），必须能与上面两类区分开
+            alice.send(99, 4, null);
+            Map<Integer, Object> unknownError = errorFrame(alice.expectFrame("自造命令字 99"));
+            assertThat(RawProto.number(unknownError, ER_CODE)).isEqualTo(ERR_BAD_REQUEST);
+            assertThat(RawProto.text(unknownError, ER_MESSAGE))
+                    .as("未知命令字不能被说成「服务端专用命令」")
+                    .contains("unsupported cmd: 99")
+                    .doesNotContain("服务端专用");
+
+            // 三类错都不该踢掉连接
+            assertPingPong(alice, 5);
         }
     }
 

@@ -66,7 +66,7 @@ uv run --with protobuf --with pyyaml --with sqlglot python tools/verify_all.py
 |---|---|
 | `schema` | 建表 SQL 语法 + **分片语义约束**（主键/幂等键必须含分片列） |
 | `server-sql` | 服务端核验脚本的语法与 information_schema 列引用 |
-| `docs` | 接入文档字节样本与签名向量 |
+| `docs` | 接入文档字节样本与签名向量 + **命令字契约三方一致**（proto ↔ §2.1 ↔ 服务端 `Frames`） |
 | `shard` | 分片口径三方一致（DDL ↔ 模板 ↔ 代码）+ 配置可解析 + **`!SINGLE` 单表规则必须非空** |
 | `errors` | 错误码契约：文档 §2 ↔ 枚举 |
 | `entities` | 实体类与建表 SQL 一致 |
@@ -75,8 +75,9 @@ uv run --with protobuf --with pyyaml --with sqlglot python tools/verify_all.py
 | `mutate` | **变异测试**：验证建表校验器真的能抓到错误 |
 | `mutate-deps` | **变异测试**：验证 ShardingSphere 依赖缺失与配置陷阱必被守卫捕获（8 类） |
 | `mutate-cfg` | **变异测试**：验证模板校验器能抓到 5 类缺陷 |
+| `mutate-cmd` | **变异测试**：验证命令字契约校验器能抓到 10 类缺陷（方向写反、编号错、漏登记、漏写方向…） |
 
-`--quick` 跳过耗时的 `docs` / `mutate` / `mutate-deps` / `mutate-cfg`。
+`--quick` 跳过耗时的 `docs` / `mutate` / `mutate-deps` / `mutate-cfg` / `mutate-cmd`。
 
 另有 2 项需要外部 MySQL/Redis（`runtime-cfg` = 运行时配置是否与当前
 `local-conn.env` 一致，`collation` = 实测服务端排序规则等价性），用 `--services` 打开：
@@ -317,6 +318,51 @@ Lettuce 真实装配，并开 `@EnableTransactionManagement`——手工 `new` �
 拿到的是「没有事务的版本」，正好会把上一节那个并发缺陷盖住。
 这份容器以 test-jar 形式给 `tm-core` 复用：那套接法只应该有一份，
 两份必然漂移（而「测试的接法与生产不一致」是最难发现的偏差）。
+
+### 命令字契约：为什么 `CMD_SYNC` 的响应要另占一个编号
+
+协议里 `payload` 是 `bytes`，**类型信息完全由 `cmd` 决定**，没有第二条线索。
+早期版本里 `CMD_SYNC = 14` 同时承担了两个方向的两种载荷：
+
+```
+C→S  payload = SyncRequest     // 「我要补消息」
+S→C  payload = SyncResponse    // 「给你补消息」
+```
+
+同一条连接上收到 `cmd=14`，接收方没有任何依据判断该按哪个类型解；而 protobuf
+**不会报错**（两者都含嵌套消息字段，只是字段号不同）：不匹配的字段被当未知字段跳过，
+返回一个「解析成功」的对象。于是这一条命令一直没有被实现——它回 50000（不静默，
+因为静默会让客户端一直等响应，现象是「消息发出去没反应」，看起来像丢包），
+而不是在这里偷偷挑一个类型去解。
+
+修法是把响应拆成独立编号 **`CMD_SYNC_RESP = 16`**，而不是把 `CMD_SYNC_END(15)`
+挪到 16 去腾位置：15 已经写在对外文档里，重排会让任何一份按文档实现的客户端静默错位，
+而追加新编号的代价只是表格里多一行（接入文档 §2.3 的「三条不变量」）。
+
+修正涉及三处**手写的**文件，它们之间没有任何编译期约束，因此每一条都有机器拦截：
+
+| 要防的事 | 拦它的东西 |
+|---|---|
+| 新增命令字时漏声明方向/载荷 | proto 枚举行格式写死，`mutate-cmd` 里「漏写方向」这个变异必被捕获 |
+| 三处写得不一致（方向写反、编号写错、漏登记） | `tools/verify_integration_docs.py` 第 5 节：proto ↔ 文档 §2.1 ↔ 服务端 `Frames` 三方逐项对比 |
+| 服务端忘了给新命令字加分支 | `Frames` 的 switch **不写 default** → javac 直接报「switch 表达式没有覆盖所有可能的输入值」 |
+| 客户端把收到的帧回显（很常见） | `BusinessHandler` 的方向门禁 → 40000 并点明「`CMD_PUSH` 是服务端专用命令」，而不是含混的 `unsupported cmd` |
+| 校验器本身是摆设 | `tools/mutate_command_contract.py`：10 个变异（方向写反 / 编号写错 / 漏一行 / 漏登记 / 少写方向…）逐个必须被捕获，10/10 |
+
+本轮为后三条做了**负面证明**（临时改坏 → 观察失败 → 还原并核对字节）：
+
+- 去掉 `Frames.expectedBodyType` 里 `CMD_SYNC_RESP` 那一行 → `mvn compile` 失败于
+  `switch 表达式没有覆盖所有可能的输入值`；去掉 `Frames.direction` 里的同样一行 → 同样编译失败。
+- 去掉 `BusinessHandler` 的方向门禁 → `serverOnlyCommandsAreRejectedAsClientMistakes`
+  立刻失败（`expected: 40000 but was: 50000`），改回即绿。
+
+> 两个 40000 的区别是有意设计的：命令字**只由服务端发**、还是**根本不存在**。
+> 把两者混成一句 `unsupported cmd`，会把排查方向指向「服务端不认识这个命令」，正好指反。
+> 而如果是「协议允许客户端发、但分发里忘了写分支」，那属于服务端自己的疏漏，
+> 回的是 50000（用 40000 会是撒谎，静默会是灾难）。
+
+**服务端侧仍未做的事**：`CMD_SYNC` 的读取路径（按 `(conv_id, seq)` 分页拉消息的仓储）
+还没实现，它现在仍然回 50000。协议歧义已经消除，剩下的与协议无关了。
 
 ### SPI 守卫：为什么会有这么一个测试
 

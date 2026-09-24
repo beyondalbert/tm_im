@@ -434,22 +434,33 @@ message Frame {
   uint64 req_id  = 2;   // 请求序号，用于 ACK 关联
   bytes  payload = 3;   // 具体消息体
 
+  // 总览。完整定义、方向与载荷的对应关系以 proto/transport.proto 为准，
+  // 下面每一行都必须与它一致（tools/verify_integration_docs.py 第 5 节机器校验）。
   enum Cmd {
-    UNKNOWN  = 0;
-    AUTH     = 1;   // C→S 鉴权：{token}
-    AUTH_OK  = 2;   // S→C 鉴权成功
-    PING     = 3;
-    PONG     = 4;
-    SEND     = 10;  // C→S 发消息
-    SEND_ACK = 11;  // S→C 已落库，携带最终 seq
-    PUSH     = 12;  // S→C 新消息推送
-    READ     = 13;  // C→S 已读上报
-    KICK     = 20;  // S→C 强制下线（多端登录/封禁）
+    CMD_UNKNOWN   = 0;   // -    保留
+    CMD_AUTH      = 1;   // C→S 鉴权：{token}
+    CMD_AUTH_OK   = 2;   // S→C 鉴权成功
+    CMD_PING      = 3;   // 双向 心跳
+    CMD_PONG      = 4;   // 双向 心跳应答
+    CMD_SEND      = 10;  // C→S 发消息
+    CMD_SEND_ACK  = 11;  // S→C 已落库，携带最终 seq
+    CMD_PUSH      = 12;  // S→C 新消息推送
+    CMD_READ      = 13;  // C→S 已读上报
+    CMD_SYNC      = 14;  // C→S 断点续传拉取
+    CMD_SYNC_END  = 15;  // S→C 续传整轮结束（仅 has_more=false 时发）
+    CMD_SYNC_RESP = 16;  // S→C 续传响应（一次请求恰好一帧）
+    CMD_KICK      = 20;  // S→C 强制下线（多端登录/封禁）
+    CMD_ERROR     = 21;  // S→C 错误（关联 req_id）
   }
 }
 ```
 
 **对外字段名统一用 `req_id`**（不叫 `seq`），避免与会话内 `seq`（消息序号）概念混淆。
+
+**一条命令字只有一种方向与一种载荷**。请求与响应必须占两个编号：早期 `CMD_SYNC(14)`
+同时充当请求与响应，接收方拿到 `cmd=14` 时无法判断该按哪个类型解，而 protobuf 又不会报错。
+修正为响应单独占 16（见 [接入文档 §2.3](integration/04-realtime.md)）。
+编号**只增不改**：已发布过的值即使语义过时也不再重排，只追加新值。
 
 ### 7.6 背压与慢连接处理
 

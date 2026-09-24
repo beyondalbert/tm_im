@@ -8,6 +8,8 @@ import com.tm.im.proto.transport.MsgType;
 import com.tm.im.proto.transport.PushMessage;
 import com.tm.im.proto.transport.SendAck;
 import com.tm.im.proto.transport.SendRequest;
+import com.tm.im.proto.transport.SyncRequest;
+import com.tm.im.proto.transport.SyncResponse;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
 
@@ -228,15 +230,80 @@ class FramesTest {
     }
 
     @Test
-    @DisplayName("背压丢弃策略：只丢 PUSH，控制帧与回执一律保留")
+    @DisplayName("背压丢弃策略：只丢 PUSH，控制帧、回执与续传响应一律保留")
     void backpressurePolicy() {
         assertThat(Frames.droppableUnderBackpressure(Frame.Cmd.CMD_PUSH)).isTrue();
         for (Frame.Cmd cmd : new Frame.Cmd[]{
                 Frame.Cmd.CMD_KICK, Frame.Cmd.CMD_ERROR, Frame.Cmd.CMD_SEND_ACK,
-                Frame.Cmd.CMD_AUTH_OK, Frame.Cmd.CMD_PONG, Frame.Cmd.CMD_SYNC_END}) {
+                Frame.Cmd.CMD_AUTH_OK, Frame.Cmd.CMD_PONG, Frame.Cmd.CMD_SYNC_END,
+                Frame.Cmd.CMD_SYNC_RESP}) {
             assertThat(Frames.droppableUnderBackpressure(cmd))
                     .as("cmd=%s 不可丢", cmd).isFalse();
         }
+    }
+
+    @Test
+    @DisplayName("命令字的方向表：服务端专用命令必须能被识别出来（含 CMD_SYNC_RESP=16）")
+    void commandDirectionsAreDeclared() {
+        // 本次协议修正的核心：请求与响应必须有两个不同的命令字。
+        // 把两者写在一个断言里，是为了让「有人把 SYNC_RESP 改回 14」这件事无法悄悄通过。
+        assertThat(Frame.Cmd.CMD_SYNC.getNumber()).isEqualTo(14);
+        assertThat(Frame.Cmd.CMD_SYNC_END.getNumber())
+                .as("15 已经出现在对外文档里，不得改含义（只增不改）")
+                .isEqualTo(15);
+        assertThat(Frame.Cmd.CMD_SYNC_RESP.getNumber()).isEqualTo(16);
+
+        assertThat(Frames.direction(Frame.Cmd.CMD_SYNC))
+                .isEqualTo(Frames.Direction.CLIENT_TO_SERVER);
+        assertThat(Frames.direction(Frame.Cmd.CMD_SYNC_RESP))
+                .isEqualTo(Frames.Direction.SERVER_TO_CLIENT);
+        assertThat(Frames.direction(Frame.Cmd.CMD_SYNC_END))
+                .isEqualTo(Frames.Direction.SERVER_TO_CLIENT);
+
+        assertThat(Frames.Direction.CLIENT_TO_SERVER.fromClient()).isTrue();
+        assertThat(Frames.Direction.BOTH.fromClient()).isTrue();
+        assertThat(Frames.Direction.SERVER_TO_CLIENT.fromClient()).isFalse();
+        assertThat(Frames.Direction.NONE.fromClient())
+                .as("保留值不给任何一方用")
+                .isFalse();
+
+        // 每个命令字都必须落在四个方向之一上，且「客户端能发」与方向严格对应：
+        // 少一个 case 的话 direction() 编译不过，但把某个命令字放进错的方向不会被发现。
+        for (Frame.Cmd cmd : Frame.Cmd.values()) {
+            Frames.Direction direction = Frames.direction(cmd);
+            assertThat(direction).as("cmd=%s 必须有方向", cmd).isNotNull();
+            assertThat(direction.fromClient())
+                    .as("cmd=%s 的 fromClient() 必须与方向一致", cmd)
+                    .isEqualTo(direction == Frames.Direction.CLIENT_TO_SERVER
+                            || direction == Frames.Direction.BOTH);
+        }
+    }
+
+    @Test
+    @DisplayName("CMD_SYNC_RESP(16) 的载荷是 SyncResponse：拿 SyncRequest 去解会被拦住")
+    void syncResponseHasItsOwnCommandWord() {
+        SyncResponse response = SyncResponse.newBuilder()
+                .addMessages(Message.newBuilder()
+                        .setMessageId(730000000000000002L).setConvId(1001).setSeq(8)
+                        .setSenderId(2002).setMsgType(MsgType.MSG_TYPE_TEXT)
+                        .setContentJson("{\"text\":\"收到，今天北京晴\"}"))
+                .setHasMore(false)
+                .build();
+        Frame frame = Frames.of(Frame.Cmd.CMD_SYNC_RESP, 3, response);
+
+        assertThat(Frames.body(frame, SyncResponse.getDefaultInstance()).getMessages(0).getSeq())
+                .isEqualTo(8L);
+
+        // 这正是从前那条歧义的形状：同一个命令字两种载荷。
+        // 修正后 14 只认 SyncRequest、16 只认 SyncResponse，两份都不能互换。
+        assertThatThrownBy(() -> Frames.body(frame, SyncRequest.getDefaultInstance()))
+                .isInstanceOf(Frames.FrameBodyException.class)
+                .hasMessageContaining("SyncResponse");
+        assertThatThrownBy(() -> Frames.body(
+                Frames.of(Frame.Cmd.CMD_SYNC, 3, SyncRequest.getDefaultInstance()),
+                SyncResponse.getDefaultInstance()))
+                .isInstanceOf(Frames.FrameBodyException.class)
+                .hasMessageContaining("SyncRequest");
     }
 
     @Test

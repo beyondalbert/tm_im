@@ -79,7 +79,7 @@ public final class RawProto {
     }
 
     /**
-     * Frame 的编码（transport.proto:28-31）。
+     * Frame 的编码（proto: Frame）。
      * 字段按序号升序写出，与 protobuf-java 的规范输出一致 —— 因此这里产出的字节
      * 可以与文档里的实测 hex 直接比对。
      */
@@ -87,7 +87,7 @@ public final class RawProto {
         return concat(varintField(1, cmd), varintField(2, reqId), lenField(3, payload));
     }
 
-    /** AuthRequest（transport.proto:82-86）。 */
+    /** AuthRequest（proto: AuthRequest）。 */
     public static byte[] authRequest(String token, String clientVersion, String deviceId) {
         return concat(stringField(1, token), stringField(2, clientVersion), stringField(3, deviceId));
     }

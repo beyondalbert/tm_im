@@ -40,6 +40,9 @@ CHECKS = [
     ("mutate",   "mutate_schema.py",            "变异测试：证明校验器不是摆设",   "sqlglot", []),
     ("mutate-deps", "mutate_sharding_deps.py",   "变异测试：缺 ShardingSphere 依赖必被捕获", "", []),
     ("mutate-cfg", "mutate_config_template.py",  "变异测试：模板校验器的 5 类盲区", "pyyaml", []),
+    # 命令字契约是手写三份的（proto / 接入文档 / 服务端 Frames），三份之间没有任何
+    # 编译期约束。CMD_SYNC 曾经一个编号同时充当请求与响应，就是这么溜进去的。
+    ("mutate-cmd", "mutate_command_contract.py", "变异测试：命令字契约三方一致校验器不是摆设", "protobuf", []),
 ]
 
 # 需要外部服务（真实 MySQL/Redis）的检查。
@@ -94,7 +97,8 @@ def main() -> int:
 
     checks = CHECKS
     if args.quick:
-        checks = [c for c in checks if c[0] not in ("docs", "mutate", "mutate-deps", "mutate-cfg")]
+        checks = [c for c in checks
+                  if c[0] not in ("docs", "mutate", "mutate-deps", "mutate-cfg", "mutate-cmd")]
     checks = list(checks) + (list(SERVICE_CHECKS) if args.services else [])
     print(BOLD("tm_im 全量自检"))
     print(DIM(f"  仓库: {REPO}"))

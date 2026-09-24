@@ -60,17 +60,18 @@ message Frame {
 
 | 值 | 名称 | 方向 | payload 类型 | 说明 |
 |---|---|---|---|---|
-| 0 | `CMD_UNKNOWN` | — | — | 保留 |
+| 0 | `CMD_UNKNOWN` | — | — | 保留，任何一方都不得使用 |
 | 1 | `CMD_AUTH` | C→S | `AuthRequest` | 鉴权（**必须是第一帧**） |
 | 2 | `CMD_AUTH_OK` | S→C | `AuthResponse` | 鉴权成功 |
-| 3 | `CMD_PING` | 双向 | 空 | 心跳 |
-| 4 | `CMD_PONG` | 双向 | 空 | 心跳应答 |
+| 3 | `CMD_PING` | 双向 | — | 心跳 |
+| 4 | `CMD_PONG` | 双向 | — | 心跳应答 |
 | 10 | `CMD_SEND` | C→S | `SendRequest` | 发消息 |
 | 11 | `CMD_SEND_ACK` | S→C | `SendAck` | 发送成功回执（含最终 seq） |
 | 12 | `CMD_PUSH` | S→C | `PushMessage` | 新消息推送 |
 | 13 | `CMD_READ` | C→S | `ReadRequest` | 已读上报 |
 | 14 | `CMD_SYNC` | C→S | `SyncRequest` | 断点续传拉取 |
-| 15 | `CMD_SYNC_END` | S→C | `SyncEnd` | 续传完成 |
+| 15 | `CMD_SYNC_END` | S→C | `SyncEnd` | 续传一轮结束（仅 `has_more=false` 时发） |
+| 16 | `CMD_SYNC_RESP` | S→C | `SyncResponse` | 续传响应（一次请求恰好一帧） |
 | 20 | `CMD_KICK` | S→C | `KickNotice` | 强制下线 |
 | 21 | `CMD_ERROR` | S→C | `ErrorFrame` | 错误（关联 req_id） |
 
@@ -85,6 +86,54 @@ message Frame {
 **用途**：并发请求时配对响应。因为长连接是全双工的，`req_id` 让你知道哪个响应属于哪个请求。
 
 > 也用于 SDK 层的「同步调用」封装（把异步响应转成 Future/Promise）。
+
+### 2.3 命令字的三条不变量（含一条真实的修正记录）
+
+| # | 不变量 | 违反时的表现 |
+|---|---|---|
+| 1 | **一个命令字只有一个方向**（因此请求与响应必须是两个不同命令字） | 接收方拿到一帧无法判断是请求还是响应 |
+| 2 | **一个命令字只对应一种 payload 类型，且一种 payload 只属于一个命令字** | `payload` 是 `bytes`，类型信息全靠 `cmd`；错配时 protobuf **不报错**，只把不匹配的字段当未知字段跳过 → 「解析成功但字段含义全错」 |
+| 3 | **编号只增不改**：一个值一旦写进本篇，含义就冻结 | 照旧版文档实现过的接入方静默错位（新编号被当成旧语义） |
+
+#### 修正记录：`CMD_SYNC` 的响应
+
+早期版本里 `CMD_SYNC = 14` 一个编号承担了两个方向的两种载荷：
+
+```
+C→S  payload = SyncRequest     // 「我要补消息」
+S→C  payload = SyncResponse    // 「给你补消息」
+```
+
+同一条连接上收到 `cmd=14`，接收方**没有任何依据**判断该按哪个类型解 —— 而 protobuf 又不会报错（两者都含嵌套消息字段，只是字段号不同），于是会出现「解析成功、字段为空或串位」这种最难查的现象。这一条同时违反不变量 1 与 2。
+
+修法是**给响应一个独立编号**，而不是让实现者去猜载荷：
+
+| | 请求 | 响应 |
+|---|---|---|
+| 命令字 | `CMD_SYNC` = **14** | `CMD_SYNC_RESP` = **16** |
+| 方向 | C→S | S→C |
+| 载荷 | `SyncRequest` | `SyncResponse` |
+
+> **为什么是「追加 16」而不是「把 `CMD_SYNC_END` 挪到 16、响应占 15」**：
+> 15 已经写在对外文档里（不变量 3）。重排会让任何一份按文档实现的客户端静默错位，
+> 而追加一个新编号的代价只是表格里多一行。
+
+#### 这三条不变量是机器校验的，不靠 reviewer 记得
+
+| 校验内容 | 位置 |
+|---|---|
+| 编号/方向/载荷三方一致：`proto/transport.proto` ↔ 本篇 §2.1 ↔ 服务端 `Frames` | `tools/verify_integration_docs.py` 第 5 节 |
+| 每条命令必须显式声明方向与载荷（格式写死，漏写即失败） | 同上（逐行校验 proto 的 `Cmd` 枚举） |
+| 编号冻结：`CMD_SYNC=14` / `CMD_SYNC_END=15` / `CMD_SYNC_RESP=16` | `FramesTest.commandDirectionsAreDeclared` |
+| 客户端发送服务端专用命令 → 40000 且说明是哪一类错 | `TwoClientEndToEndTest.serverOnlyCommandsAreRejectedAsClientMistakes` |
+| 请求与响应不会用到同一个编号 | `FramesTest.syncResponseHasItsOwnCommandWord` |
+
+#### 客户端必须做到的两件事
+
+1. **不要回显服务端帧**。`CMD_AUTH_OK`/`CMD_SEND_ACK`/`CMD_PUSH`/`CMD_SYNC_RESP`/`CMD_SYNC_END`/`CMD_KICK`/`CMD_ERROR` 都只由服务端发出；
+   发过去会得到 `40000`（服务端能明确指出「这是服务端专用命令」，而不是含混的「未知命令」）。
+2. **按命令字解码，不要按「猜」**。`payload` 里没有类型信息，`cmd` 是唯一依据；
+   解不出来就是协议实现错了，应该当作致命错误处理，不要用默认值堆过去。
 
 ---
 
@@ -301,6 +350,68 @@ payload（PushMessage）：
 > **重要观察**：`req_id=0` 时字段**完全不出现**（protobuf3 默认值不编码）。
 > 你的解码器必须能处理「字段缺失」，用默认值 0 补齐。
 
+### 4.5 SYNC_RESP 帧（123 字节）
+
+重连后补齐丢失消息的响应（§6）。注意命令字是 **16**，不是 14 —— 14 只用于客户端发出的 `SyncRequest`（§2.3）。
+
+```
+08 10 10 03 1a 75 0a 40 08 82 80 a4 f0 9d e4 de
+90 0a 10 e9 07 18 08 20 d2 0f 28 01 32 23 7b 22
+74 65 78 74 22 3a 22 e6 94 b6 e5 88 b0 ef bc 8c
+e4 bb 8a e5 a4 a9 e5 8c 97 e4 ba ac e6 99 b4 22
+7d 40 c8 d3 ea b6 b7 33 0a 31 08 83 80 a4 f0 9d
+e4 de 90 0a 10 e9 07 18 09 20 e9 07 28 01 32 14
+7b 22 74 65 78 74 22 3a 22 e6 98 8e e5 a4 a9 e8
+a7 81 22 7d 40 95 d6 ea b6 b7 33
+```
+
+```
+Frame 层：
+  08 10        cmd    = 16 (CMD_SYNC_RESP)
+  10 03        req_id = 3    ← 与客户端发出的 CMD_SYNC 相同
+  1a 75        payload LEN=0x75=117
+
+payload（SyncResponse）：
+  0a 40 ...    字段1 messages，第 1 条，LEN=0x40=64
+                └─ 与 §4.4 PUSH 里那条完全相同的 Message（seq=8）
+  0a 31 ...    字段1 messages，第 2 条，LEN=0x31=49
+                ├─ 08 83 80 ...  message_id = 730000000000000003
+                ├─ 10 e9 07     conv_id = 1001
+                ├─ 18 09        seq = 9        ★ 必须严格递增
+                ├─ 20 e9 07     sender_id = 1001
+                ├─ 28 01        msg_type = 1 (TEXT)
+                ├─ 32 14        content_json LEN=0x14=20 → {"text":"明天见"}
+                └─ 40 95 d6 ... created_at_ms = 1767225600789
+  字段2 has_more 与 字段3 truncated 都是 false
+  → （protobuf3 默认值不编码，两个字段完全不出现；解码时必须当作 false）
+```
+
+> **为什么 `has_more` / `truncated` 一个字节都没有？** protobuf3 **不编码默认值**（`false`），
+> 「没出现」就等于 `false`。这必须当真处理：把缺失当成「不知道」会让客户端行为不确定，
+> 而把 `truncated` 的缺失当成 `true`，会把所有客户端都送去走 REST 补拉。
+> §4.4 的 `req_id=0`（字段消失）是同一个机制，不是特例。
+
+### 4.6 SYNC_END 帧（10 字节）
+
+```
+08 0f 10 03 1a 04 08 01 18 02
+```
+
+```
+Frame 层：
+  08 0f        cmd    = 15 (CMD_SYNC_END)
+  10 03        req_id = 3    ← 与上面那帧相同
+  1a 04        payload LEN=4
+
+payload（SyncEnd）：
+  08 01        ok = true
+  （message 为空字符串 → 不编码）
+  18 02        conv_synced = 2   ← 本轮补齐的会话数
+```
+
+> 这两帧是**一对**：`CMD_SYNC_RESP(16)` 带消息，`CMD_SYNC_END(15)` 带「这轮完了」。
+> 它们共用同一个 `req_id`，且都不属于客户端可发送的方向。
+
 ---
 
 ## 5. 连接生命周期
@@ -327,9 +438,9 @@ sequenceDiagram
   S-->>C: PUSH(message)          ← 对方回的消息
   C->>S: READ(conv_id, last_read_seq=8)
 
-  C->>S: SYNC(cursors=[{conv_id, since_seq=last}])
-  S-->>C: SYNC responses...
-  S-->>C: SYNC_END(ok=true)
+  C->>S: SYNC(req_id=3, cursors=[{conv_id, since_seq=last}])
+  S-->>C: SYNC_RESP(req_id=3, messages...)
+  S-->>C: SYNC_END(req_id=3, ok=true)
 
   S-->>C: KICK(reason=SERVER_RESTART)
   Note over C: 指数退避后重连
@@ -386,6 +497,14 @@ KickNotice {
 
 ## 6. 断点续传（核心机制）
 
+> ⚠️ **实现进度：协议已定稿，服务端读取路径尚未实现。**
+> 本节定义的命令字、方向与载荷已经冻结（§2.3，有机器校验），但服务端还没有
+> 「按 `(conv_id, since_seq)` 分页拉消息」的仓储，因此现在发 `CMD_SYNC` 会收到
+> `CMD_ERROR`（`50000`，`retryable=true`）——**不会静默**，但也不会返回消息。
+> 在它接通之前，请用 §8 的 REST 路径补齐断线消息；协议本身不会再变，
+> 接通后客户端无需改代码。当前行为由
+> `TwoClientEndToEndTest.readyConnectionAnswersProtocolMistakes` 钉住。
+
 ### 6.1 客户端需要持久化的唯一状态
 
 **每个会话一个整数**：最后处理到的 `seq`。
@@ -399,12 +518,12 @@ KickNotice {
 ```
 1. 重连 + AUTH
 2. 构造 SYNC 请求，带上所有会话的 last_seq
-3. 服务端按 (conv_id, seq) 升序返回缺失消息
-4. 若 has_more=true，继续发 SYNC 直到 false
+3. 服务端按 (conv_id, seq) 升序返回缺失消息（一帧 CMD_SYNC_RESP）
+4. 若 has_more=true，推进游标（取本帧最后一条的 seq）后继续发 SYNC，直到 false
 5. 收到 SYNC_END 后，恢复正常实时接收
 ```
 
-**请求（`CMD_SYNC` = 14）：**
+**请求（`CMD_SYNC` = 14，C→S，载荷 `SyncRequest`）：**
 
 ```protobuf
 SyncRequest {
@@ -416,26 +535,40 @@ SyncRequest {
 }
 ```
 
-**响应（服务端连发多个 `CMD_SYNC`，最后一个是 `CMD_SYNC_END`）：**
+**响应（`CMD_SYNC_RESP` = 16，S→C）：一次请求恰好收到一帧**，`req_id` 原样回传：
 
 ```protobuf
-Frame {  // CMD_SYNC 的响应 payload 是 SyncResponse
-  cmd: 14, req_id: <原样回传>,
+Frame {
+  cmd: 16,                          // CMD_SYNC_RESP（不是 14——见 §2.3）
+  req_id: <原样回传>,
   payload: SyncResponse {
-    messages: [ /* seq 升序 */ ],
+    messages: [ /* 按 (conv_id, seq) 升序 */ ],
     has_more: false,
     truncated: false
   }
 }
 ```
 
+| 响应字段 | 客户端应做 |
+|---|---|
+| `has_more = true` | 推进游标（本帧最后一条的 seq）后再发一次 `CMD_SYNC` |
+| `has_more = false` | 紧接着会收到一帧 `CMD_SYNC_END`，此后恢复正常接收 |
+| `truncated = true` | 服务端补不齐（超出消息保留期），改用 REST 拉历史（§6.4） |
+
 ```protobuf
 Frame {
   cmd: 15,                              // CMD_SYNC_END
-  req_id: <原样回传>,
+  req_id: <与上面那帧相同>,
   payload: SyncEnd { ok: true, conv_synced: 2 }
 }
 ```
+
+> **`CMD_SYNC_END` 只在 `has_more=false` 时出现。** `has_more=true` 时不得发它——
+> 否则客户端会在还没补齐的情况下以为已经追平，接着开始接收实时推送，
+> 而中间缺的那段再也没人补。
+>
+> **命名提醒：**`CMD_SYNC`（14，C→S）是「我来拉」，`CMD_SYNC_RESP`（16，S→C）是「给你」，
+> `CMD_SYNC_END`（15，S→C）是「这轮完了」。三者方向固定，不存在同一编号双向的情况。
 
 ### 6.3 为什么不会丢消息
 
@@ -476,6 +609,7 @@ GET /v1/conversations/1001/messages?limit=200&cursor=...
 | 8 | **指数退避重连** | 1s → 2s → 4s → … 上限 30s，加抖动 |
 | 9 | **识别 KICK** | 不同 reason 处理策略不同，不要盲目重连 |
 | 10 | **UTF-8 长度按字节算** | 中文 3 字节，LEN 是字节数不是字符数 |
+| 11 | **不要回显服务端帧** | `CMD_PUSH`/`CMD_SYNC_RESP`/`CMD_SYNC_END` 等只由服务端发出，发过去会得 40000（§2.3） |
 
 ### 7.1 重连退避参考实现
 
