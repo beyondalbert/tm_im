@@ -33,27 +33,42 @@ PREFIX = "tm_im"
 #
 # 为什么必须显式写 COLLATE：
 #   只写 DEFAULT CHARSET=utf8mb4 时，排序规则取“该字符集的默认值”，而这个
-#   默认值随服务端大版本变化：
+#   默认值随服务端版本与配置变化：
 #       MySQL 5.7  →  utf8mb4_general_ci
-#       MySQL 8.0  →  utf8mb4_0900_ai_ci
-#   后果：
-#     · 同一个脚本在 5.7 与 8.0 上建出的表，排序规则不同
-#     · 跨表 JOIN / 比较时可能报 Illegal mix of collations
-#     · 迁移或主从混版本时出现难以定位的排序差异
+#       MySQL 8.0+ →  utf8mb4_0900_ai_ci
+#   本实例（8.4.4）的 @@collation_server 实测为 utf8mb4_general_ci，
+#   即被托方改回了旧默认值。若我们跟随它，就会用上 UCA 最早的排序规则；
+#   若不显式指定，表级规则又会随环境而变，跨表 JOIN 可能报
+#   Illegal mix of collations。所以必须逐表写死。
 #
-# 选 utf8mb4_unicode_ci 的理由：
-#   · 5.7 与 8.0 上**都存在**（utf8mb4_0900_* 是 8.0 独有，5.7 会报错）
-#   · Unicode 排序正确性优于 utf8mb4_general_ci
+# 为什么是 utf8mb4_0900_ai_ci（2026-09 调整，原为 utf8mb4_unicode_ci）：
+#   · 原选 unicode_ci 的理由是“5.7 与 8.0 上都有”——那是为了兼容已经不用的
+#     5.7 实例（3306）。服务现已在 13306 的 MySQL 8.4.4 上，该理由消失。
+#   · unicode_ci 用 UCA 4.0.0，0900_ai_ci 用 UCA 9.0.0。消息正文是自由文本，
+#     排序与等价判断会落在它上面，现代 UCA 更合适。
+#
+# 关于 handle 的唯一索引——曾在两种规则间担心的等价差异实测如下（见
+# tools/probe_collation.py）：
+#     unicode_ci:  strasse == straße          （会撞）
+#     0900_ai_ci:  strasse == straße, ae == æ （会撞更多）
+#   但 handle 的校验规则是“3-32 位字母数字下划线”（docs/integration/02-auth.md，
+#   错误码 40004），即**纯 ASCII**。非 ASCII 的 handle 根本进不了库，
+#   所以上述差异对 uk_handle 不产生任何实际影响。决策依据是实测 + 数据约束，
+#   不是记忆。
+#
+# 若将来需要回到兼容 5.7 的规则，传 --collation utf8mb4_unicode_ci 重新生成。
 # ============================================================================
 CHARSET = "utf8mb4"
-COLLATION = "utf8mb4_unicode_ci"
+COLLATION = "utf8mb4_0900_ai_ci"
 
 # ============================================================================
 # 表定义
 #
 # 约定：所有 DATETIME(3) 用毫秒精度（IM 场景秒级不够，见 DESIGN §9.4）
-#      所有表 ENGINE=InnoDB CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
-#      （表级 COLLATE 由 _normalize_charset 统一补齐，见 build()）
+#      所有表 ENGINE=InnoDB CHARSET=utf8mb4 COLLATE={上面那一条}——
+#      为什么不能省：显式写死才能与建库时的规则一致，否则跨表 JOIN
+#      可能报 Illegal mix of collations；表级 COLLATE 由 _normalize_charset
+#      统一补齐，见 build()。
 # ============================================================================
 
 HEADER_TMPL = """\
@@ -319,9 +334,9 @@ def main() -> int:
     ap.add_argument("--shards", type=int, default=SHARDS_DEFAULT)
     ap.add_argument("--prefix", default=PREFIX, help="库名")
     ap.add_argument("--collation", default=COLLATION,
-                    help="表排序规则。默认 utf8mb4_unicode_ci（5.7/8.0 均支持）。\n"
-                         "若库已存在且为 8.0 默认（utf8mb4_0900_ai_ci），"
-                         "可传该值以对齐，但会失去 5.7 兼容性")
+                    help="表排序规则。默认 utf8mb4_0900_ai_ci"
+                         "（MySQL 8.0+ 的现代默认，服务端 8.4.4）。\n"
+                         "传 utf8mb4_unicode_ci 可回到兼容 5.7 的规则")
     ap.add_argument("--check", action="store_true",
                     help="校验已生成文件是否与当前定义一致（CI 用；不写盘）")
     args = ap.parse_args()
@@ -330,11 +345,12 @@ def main() -> int:
         print(f"错误：--shards 必须是 2 的幂（取模路由要求），当前 {args.shards}")
         return 2
 
-    # 排序规则合法性：8.0 专有排序规则会让 5.7 建表直接报 Unknown collation
-    if args.collation.endswith("0900_ai_ci") or "_0900_" in args.collation:
-        print(f"警告：{args.collation} 是 MySQL 8.0 专有排序规则，")
-        print("      在 5.7 服务端上执行本脚本会报 ERROR 1273 Unknown collation。")
-        print("      仅当你确认服务端为 8.0 且库已用该排序规则时才使用。")
+    # 排序规则合法性：8.0 专有排序规则会让 5.7 建表直接报 Unknown collation。
+    # 服务端已从 5.7 迁到 8.4，这里的提醒是给“误把脚本指向旧实例”的情况留的。
+    if "_0900_" in args.collation:
+        print(f"注意：{args.collation} 是 MySQL 8.0+ 专有排序规则，")
+        print("      在 5.7 服务端（旧实例 3306）上执行会报 ERROR 1273 Unknown collation。")
+        print("      当前服务端为 8.4.4（13306），因此这是预期选择。")
 
     text = build(args.shards, args.prefix, args.collation)
 

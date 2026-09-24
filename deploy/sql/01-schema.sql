@@ -8,7 +8,7 @@
 -- 分片键：  conv_id
 -- 路由算法：message_${conv_id % 16}
 --
--- 生成指纹：acfc82b4be02a95d
+-- 生成指纹：b5abe3b689276734
 -- ============================================================================
 
 SET NAMES utf8mb4;
@@ -18,7 +18,7 @@ SET FOREIGN_KEY_CHECKS = 1;
 -- 库（如需手工建库可取消注释；权限不足请让 DBA 执行）
 -- ---------------------------------------------------------------------------
 -- CREATE DATABASE IF NOT EXISTS `tm_im`
---   DEFAULT CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;
+--   DEFAULT CHARACTER SET utf8mb4 COLLATE utf8mb4_0900_ai_ci;
 
 USE `tm_im`;
 
@@ -40,7 +40,7 @@ CREATE TABLE IF NOT EXISTS `actor` (
   PRIMARY KEY (`id`),
   UNIQUE KEY `uk_handle` (`handle`),
   KEY `idx_type_status` (`actor_type`, `status`)
-) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci COMMENT='唯一参与者表：人/Agent 同构';
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci COMMENT='唯一参与者表：人/Agent 同构';
 
 -- 凭据隔离到独立表：actor 是高频读取的公开信息，凭据不应与之同页
 CREATE TABLE IF NOT EXISTS `actor_secret` (
@@ -49,7 +49,7 @@ CREATE TABLE IF NOT EXISTS `actor_secret` (
   `secret_hash`   VARCHAR(255) NOT NULL,
   `last_used_at`  DATETIME(3)  NULL,
   PRIMARY KEY (`actor_id`, `secret_type`)
-) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci COMMENT='凭据，与人/Agent 无关';
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci COMMENT='凭据，与人/Agent 无关';
 
 -- Agent 扩展：Human 无此行。owner_actor 防止 Agent 成为孤儿
 CREATE TABLE IF NOT EXISTS `agent_profile` (
@@ -62,7 +62,7 @@ CREATE TABLE IF NOT EXISTS `agent_profile` (
   `rate_limit`    INT          NOT NULL DEFAULT 60     COMMENT '每秒配额',
   PRIMARY KEY (`actor_id`),
   KEY `idx_owner` (`owner_actor`)
-) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci COMMENT='Agent 专属扩展';
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci COMMENT='Agent 专属扩展';
 
 -- ============================================================================
 -- 2. 会话与成员
@@ -79,7 +79,7 @@ CREATE TABLE IF NOT EXISTS `conversation` (
   PRIMARY KEY (`id`),
   UNIQUE KEY `uk_pair_key` (`pair_key`),
   KEY `idx_owner` (`owner_actor`)
-) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci COMMENT='会话；单聊/群聊同构';
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci COMMENT='会话；单聊/群聊同构';
 
 -- 注意：不做「单聊双方唯一」的额外约束——单聊会话由 pair_key 保证唯一
 
@@ -92,7 +92,7 @@ CREATE TABLE IF NOT EXISTS `conversation_member` (
   `joined_at`      DATETIME(3) NOT NULL,
   PRIMARY KEY (`conv_id`, `actor_id`),
   KEY `idx_actor` (`actor_id`)                         COMMENT '拉「我的会话列表」'
-) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci COMMENT='会话成员';
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci COMMENT='会话成员';
 
 -- ============================================================================
 -- 3. 消息分片表（逻辑表 message → 物理表 message_0 .. message_15）
@@ -122,7 +122,7 @@ CREATE TABLE IF NOT EXISTS `message_0` (
   PRIMARY KEY (`conv_id`, `seq`),
   UNIQUE KEY `uk_message_idem` (`conv_id`, `sender_id`, `client_msg_id`),
   KEY `idx_conv_time` (`conv_id`, `created_at`)
-) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci COMMENT='消息分片表 n=0';
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci COMMENT='消息分片表 n=0';
 
 CREATE TABLE IF NOT EXISTS `message_1` (
   `id`            BIGINT      NOT NULL                 COMMENT 'Snowflake',
@@ -137,7 +137,7 @@ CREATE TABLE IF NOT EXISTS `message_1` (
   PRIMARY KEY (`conv_id`, `seq`),
   UNIQUE KEY `uk_message_idem` (`conv_id`, `sender_id`, `client_msg_id`),
   KEY `idx_conv_time` (`conv_id`, `created_at`)
-) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci COMMENT='消息分片表 n=1';
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci COMMENT='消息分片表 n=1';
 
 CREATE TABLE IF NOT EXISTS `message_2` (
   `id`            BIGINT      NOT NULL                 COMMENT 'Snowflake',
@@ -152,7 +152,7 @@ CREATE TABLE IF NOT EXISTS `message_2` (
   PRIMARY KEY (`conv_id`, `seq`),
   UNIQUE KEY `uk_message_idem` (`conv_id`, `sender_id`, `client_msg_id`),
   KEY `idx_conv_time` (`conv_id`, `created_at`)
-) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci COMMENT='消息分片表 n=2';
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci COMMENT='消息分片表 n=2';
 
 CREATE TABLE IF NOT EXISTS `message_3` (
   `id`            BIGINT      NOT NULL                 COMMENT 'Snowflake',
@@ -167,7 +167,7 @@ CREATE TABLE IF NOT EXISTS `message_3` (
   PRIMARY KEY (`conv_id`, `seq`),
   UNIQUE KEY `uk_message_idem` (`conv_id`, `sender_id`, `client_msg_id`),
   KEY `idx_conv_time` (`conv_id`, `created_at`)
-) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci COMMENT='消息分片表 n=3';
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci COMMENT='消息分片表 n=3';
 
 CREATE TABLE IF NOT EXISTS `message_4` (
   `id`            BIGINT      NOT NULL                 COMMENT 'Snowflake',
@@ -182,7 +182,7 @@ CREATE TABLE IF NOT EXISTS `message_4` (
   PRIMARY KEY (`conv_id`, `seq`),
   UNIQUE KEY `uk_message_idem` (`conv_id`, `sender_id`, `client_msg_id`),
   KEY `idx_conv_time` (`conv_id`, `created_at`)
-) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci COMMENT='消息分片表 n=4';
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci COMMENT='消息分片表 n=4';
 
 CREATE TABLE IF NOT EXISTS `message_5` (
   `id`            BIGINT      NOT NULL                 COMMENT 'Snowflake',
@@ -197,7 +197,7 @@ CREATE TABLE IF NOT EXISTS `message_5` (
   PRIMARY KEY (`conv_id`, `seq`),
   UNIQUE KEY `uk_message_idem` (`conv_id`, `sender_id`, `client_msg_id`),
   KEY `idx_conv_time` (`conv_id`, `created_at`)
-) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci COMMENT='消息分片表 n=5';
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci COMMENT='消息分片表 n=5';
 
 CREATE TABLE IF NOT EXISTS `message_6` (
   `id`            BIGINT      NOT NULL                 COMMENT 'Snowflake',
@@ -212,7 +212,7 @@ CREATE TABLE IF NOT EXISTS `message_6` (
   PRIMARY KEY (`conv_id`, `seq`),
   UNIQUE KEY `uk_message_idem` (`conv_id`, `sender_id`, `client_msg_id`),
   KEY `idx_conv_time` (`conv_id`, `created_at`)
-) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci COMMENT='消息分片表 n=6';
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci COMMENT='消息分片表 n=6';
 
 CREATE TABLE IF NOT EXISTS `message_7` (
   `id`            BIGINT      NOT NULL                 COMMENT 'Snowflake',
@@ -227,7 +227,7 @@ CREATE TABLE IF NOT EXISTS `message_7` (
   PRIMARY KEY (`conv_id`, `seq`),
   UNIQUE KEY `uk_message_idem` (`conv_id`, `sender_id`, `client_msg_id`),
   KEY `idx_conv_time` (`conv_id`, `created_at`)
-) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci COMMENT='消息分片表 n=7';
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci COMMENT='消息分片表 n=7';
 
 CREATE TABLE IF NOT EXISTS `message_8` (
   `id`            BIGINT      NOT NULL                 COMMENT 'Snowflake',
@@ -242,7 +242,7 @@ CREATE TABLE IF NOT EXISTS `message_8` (
   PRIMARY KEY (`conv_id`, `seq`),
   UNIQUE KEY `uk_message_idem` (`conv_id`, `sender_id`, `client_msg_id`),
   KEY `idx_conv_time` (`conv_id`, `created_at`)
-) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci COMMENT='消息分片表 n=8';
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci COMMENT='消息分片表 n=8';
 
 CREATE TABLE IF NOT EXISTS `message_9` (
   `id`            BIGINT      NOT NULL                 COMMENT 'Snowflake',
@@ -257,7 +257,7 @@ CREATE TABLE IF NOT EXISTS `message_9` (
   PRIMARY KEY (`conv_id`, `seq`),
   UNIQUE KEY `uk_message_idem` (`conv_id`, `sender_id`, `client_msg_id`),
   KEY `idx_conv_time` (`conv_id`, `created_at`)
-) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci COMMENT='消息分片表 n=9';
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci COMMENT='消息分片表 n=9';
 
 CREATE TABLE IF NOT EXISTS `message_10` (
   `id`            BIGINT      NOT NULL                 COMMENT 'Snowflake',
@@ -272,7 +272,7 @@ CREATE TABLE IF NOT EXISTS `message_10` (
   PRIMARY KEY (`conv_id`, `seq`),
   UNIQUE KEY `uk_message_idem` (`conv_id`, `sender_id`, `client_msg_id`),
   KEY `idx_conv_time` (`conv_id`, `created_at`)
-) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci COMMENT='消息分片表 n=10';
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci COMMENT='消息分片表 n=10';
 
 CREATE TABLE IF NOT EXISTS `message_11` (
   `id`            BIGINT      NOT NULL                 COMMENT 'Snowflake',
@@ -287,7 +287,7 @@ CREATE TABLE IF NOT EXISTS `message_11` (
   PRIMARY KEY (`conv_id`, `seq`),
   UNIQUE KEY `uk_message_idem` (`conv_id`, `sender_id`, `client_msg_id`),
   KEY `idx_conv_time` (`conv_id`, `created_at`)
-) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci COMMENT='消息分片表 n=11';
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci COMMENT='消息分片表 n=11';
 
 CREATE TABLE IF NOT EXISTS `message_12` (
   `id`            BIGINT      NOT NULL                 COMMENT 'Snowflake',
@@ -302,7 +302,7 @@ CREATE TABLE IF NOT EXISTS `message_12` (
   PRIMARY KEY (`conv_id`, `seq`),
   UNIQUE KEY `uk_message_idem` (`conv_id`, `sender_id`, `client_msg_id`),
   KEY `idx_conv_time` (`conv_id`, `created_at`)
-) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci COMMENT='消息分片表 n=12';
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci COMMENT='消息分片表 n=12';
 
 CREATE TABLE IF NOT EXISTS `message_13` (
   `id`            BIGINT      NOT NULL                 COMMENT 'Snowflake',
@@ -317,7 +317,7 @@ CREATE TABLE IF NOT EXISTS `message_13` (
   PRIMARY KEY (`conv_id`, `seq`),
   UNIQUE KEY `uk_message_idem` (`conv_id`, `sender_id`, `client_msg_id`),
   KEY `idx_conv_time` (`conv_id`, `created_at`)
-) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci COMMENT='消息分片表 n=13';
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci COMMENT='消息分片表 n=13';
 
 CREATE TABLE IF NOT EXISTS `message_14` (
   `id`            BIGINT      NOT NULL                 COMMENT 'Snowflake',
@@ -332,7 +332,7 @@ CREATE TABLE IF NOT EXISTS `message_14` (
   PRIMARY KEY (`conv_id`, `seq`),
   UNIQUE KEY `uk_message_idem` (`conv_id`, `sender_id`, `client_msg_id`),
   KEY `idx_conv_time` (`conv_id`, `created_at`)
-) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci COMMENT='消息分片表 n=14';
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci COMMENT='消息分片表 n=14';
 
 CREATE TABLE IF NOT EXISTS `message_15` (
   `id`            BIGINT      NOT NULL                 COMMENT 'Snowflake',
@@ -347,7 +347,7 @@ CREATE TABLE IF NOT EXISTS `message_15` (
   PRIMARY KEY (`conv_id`, `seq`),
   UNIQUE KEY `uk_message_idem` (`conv_id`, `sender_id`, `client_msg_id`),
   KEY `idx_conv_time` (`conv_id`, `created_at`)
-) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci COMMENT='消息分片表 n=15';
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci COMMENT='消息分片表 n=15';
 
 -- ============================================================================
 -- 4. 社交与广场
@@ -364,7 +364,7 @@ CREATE TABLE IF NOT EXISTS `friendship` (
   PRIMARY KEY (`actor_a`, `actor_b`),
   KEY `idx_b` (`actor_b`, `status`)                  COMMENT '反向查询',
   KEY `idx_initiator_status` (`initiator`, `status`)
-) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci COMMENT='好友关系，无序对存储';
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci COMMENT='好友关系，无序对存储';
 
 CREATE TABLE IF NOT EXISTS `post` (
   `id`         BIGINT      NOT NULL,
@@ -375,7 +375,7 @@ CREATE TABLE IF NOT EXISTS `post` (
   PRIMARY KEY (`id`),
   KEY `idx_author_time` (`author_id`, `created_at`),
   KEY `idx_visibility_time` (`visibility`, `created_at`)  COMMENT '广场全局流'
-) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci COMMENT='动态';
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci COMMENT='动态';
 
 -- 收件箱式时间线（写扩散产物）。
 -- 主键含 score → ORDER BY score DESC 走聚簇索引，无需额外排序
@@ -386,7 +386,7 @@ CREATE TABLE IF NOT EXISTS `feed_item` (
   `author_id` BIGINT NOT NULL,
   PRIMARY KEY (`owner_id`, `score`, `post_id`),
   KEY `idx_post` (`post_id`)                         COMMENT '删除动态时清理'
-) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci COMMENT='广场收件箱';
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci COMMENT='广场收件箱';
 
 CREATE TABLE IF NOT EXISTS `media` (
   `id`         BIGINT       NOT NULL,
@@ -399,7 +399,7 @@ CREATE TABLE IF NOT EXISTS `media` (
   `created_at` DATETIME(3)  NOT NULL,
   PRIMARY KEY (`id`),
   KEY `idx_owner_time` (`owner_id`, `created_at`)
-) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci COMMENT='媒体元数据（对象存储只存 key）';
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci COMMENT='媒体元数据（对象存储只存 key）';
 
 -- ============================================================================
 -- 共 16 张 message 分片表 + 9 张非分片表

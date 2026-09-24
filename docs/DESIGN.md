@@ -50,16 +50,19 @@
 | JDK 17（`D:\tools\jdk17`） | ✅ 已装 | 直接使用 |
 | Maven 3.9.6 | ✅ 已装 | 直接使用 |
 | Node 22.23.1 + npm 10 | ✅ 已装 | 构建 Vue |
-| MySQL | ❌ 本机无（3306 无监听） | **用你提供的外部实例** |
-| Redis | ❌ 本机无（6379 无监听） | **用你提供的外部实例** |
+| MySQL | ✅ 外部实例 **8.4.4** @ `192.140.178.79:13306` | 库 `tm_im` 已建（25 表） |
+| Redis | ✅ 外部实例 **7.4.2** @ `192.140.178.79:6379` | AUTH + PING 已通 |
+| 旧 MySQL 5.7.44 @ `:3306` | — 保留但不使用 | 误指向它会在建表时抛 ERROR 1273 |
 | Docker / WSL | ❌ 未装（WSL 需管理员+重启） | 不依赖容器 |
 | Maven Central / npm / GitHub | ✅ 可达 | 依赖可拉取 |
 | 网络位置 | 国内（zh_CN） | 构建走镜像加速 |
 
 ### 2.2 结论
 
-**本机不装 MySQL/Redis。** 开发与生产共用你提供的外部实例（可用不同 database/schema 隔离）。
-M0 的验收标准从"本机起库"改为：**用你给的连接信息连通 MySQL + Redis，并让 ShardingSphere 成功初始化分片。**
+**本机不装 MySQL/Redis。** 开发与生产共用外部实例（不同 database/schema 隔离）。
+
+M0 验收标准：**连通 MySQL + Redis，建库建表，并验证 `conv_id=100` 落入 `message_4`。**
+已于 2026-09 达成（`tools/bootstrap_db.py --apply` 22 项全通过，见 README）。
 
 ---
 

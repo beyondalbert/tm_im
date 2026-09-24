@@ -59,7 +59,7 @@
     <os-maven-plugin.version>1.7.1</os-maven-plugin.version>
 
     <tm-mysql.host>127.0.0.1</tm-mysql.host>
-    <tm-mysql.port>3306</tm-mysql.port>
+    <tm-mysql.port>13306</tm-mysql.port>
     <tm-mysql.database>tm_im</tm-mysql.database>
   </properties>
 

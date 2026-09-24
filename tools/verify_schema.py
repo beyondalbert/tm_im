@@ -30,14 +30,30 @@ SHARDING = REPO / "deploy" / "conf" / "sharding.yaml.example"
 PASS, FAIL = 0, 0
 QUIET = False
 
-# 跨 MySQL 大版本都存在的排序规则。
-# 刻意不包括 utf8mb4_0900_* —— 它是 MySQL 8.0 专有，在 5.7 上建表会直接报
-# "Unknown collation"。当前外部库是 5.7.44，必须避开。
-VERSION_SAFE_COLLATIONS = {
-    "utf8mb4_general_ci",   # 5.7 的默认值
-    "utf8mb4_unicode_ci",   # 推荐：Unicode 排序比 general_ci 正确
+# 允许的排序规则白名单。
+#
+# 这里的目的不是“只允许最兼容的”，而是“不允许出现意料之外的”：
+# 排序规则决定了哪些字符串相等，而 handle 上有唯一索引，
+# 所以它直接影响数据语义。白名单里每一项都要能说清为什么在列。
+ALLOWED_COLLATIONS = {
+    # 当前选择。服务端已从 5.7（3306）迁到 8.4.4（13306），
+    # 5.7 兼容不再是约束；UCA 9.0.0 对自由文本（消息正文）更合适。
+    "utf8mb4_0900_ai_ci",
+    # 兼容 5.7 的备选。若将来必须同时面对 5.7，用它重新生成建表脚本。
+    # 与 0900_ai_ci 的差别（实测，见 tools/probe_collation.py）：
+    #   unicode_ci:  strasse == straße
+    #   0900_ai_ci:  strasse == strasse、ae == æ
+    # handle 限 ASCII（字母数字下划线），所以两者对唯一索引的实际影响相同。
+    "utf8mb4_unicode_ci",
     "utf8mb4_unicode_520_ci",
     "utf8mb4_bin",
+}
+
+# 明确拒绝的：最老的 UCA，连 cafe 与 café 都视为相等。
+# 本实例的服务端默认值就是它（@@collation_server），若建表时不显式写
+# COLLATE，表会默认跟随它。
+REJECTED_COLLATIONS = {
+    "utf8mb4_general_ci",
 }
 
 def ok(m):
@@ -244,32 +260,60 @@ def main() -> int:
     if bad_cs:  bad(f"非 utf8mb4: {bad_cs}")
     else:       ok("全部 CHARSET=utf8mb4（需存 emoji）")
 
-    # 排序规则：必须显式声明，且不得使用版本专有排序规则
+    # 排序规则
     #
     # 只写 DEFAULT CHARSET=utf8mb4 时，排序规则取“该字符集的默认值”，而这个默认值
-    # 随服务端大版本变化（5.7 → utf8mb4_general_ci；8.0 → utf8mb4_0900_ai_ci）。
-    # 后果：同一脚本在不同版本上建出的表排序规则不同，跨表 JOIN 可能报
-    #       Illegal mix of collations，且迁移时出现难以定位的排序差异。
+    # 随服务端版本与配置变化（5.7/general_ci、8.0+/0900_ai_ci，而本实例被托方
+    # 改回了 general_ci）。后果：同一脚本在不同环境建出的表规则不同，
+    # 跨表 JOIN 报 Illegal mix of collations，且迁移时出现难以定位的排序差异。
     no_collate = sorted(t for t, s in tables.items() if "COLLATE=" not in s)
     if no_collate:
         bad(f"{len(no_collate)} 张表未显式声明 COLLATE，例如 {no_collate[:4]}")
-        print("         → 排序规则将随 MySQL 版本漂移（5.7 与 8.0 不同）")
+        print("         → 排序规则将随服务端配置漂移")
     else:
-        ok(f"全部 {len(tables)} 张表显式声明 COLLATE（不随服务端版本漂移）")
+        ok(f"全部 {len(tables)} 张表显式声明 COLLATE（不随服务端配置漂移）")
 
     used = set(re.findall(r"COLLATE=(\w+)", sql))
-    unsafe = sorted(c for c in used if c not in VERSION_SAFE_COLLATIONS)
-    if unsafe:
-        bad(f"使用了版本专有排序规则 {unsafe}（现有库为 5.7，建表会失败）")
-    elif used:
-        ok(f"排序规则 {sorted(used)} 在 MySQL 5.7 与 8.0 上均存在")
 
-    # 全文（含注释）不得出现 8.0 专有排序规则 —— 用户可能直接复制注释里的语句
+    # 最关键的一条：必须**只有一种**规则。混用会在跨表 JOIN 时报
+    # Illegal mix of collations，而且报错只在那条 SQL 上出现，很难归因。
+    if len(used) > 1:
+        bad(f"同一个库里出现了多种排序规则 {sorted(used)}——跨表 JOIN 会报 "
+            f"Illegal mix of collations")
+    elif used:
+        ok(f"全部表使用统一排序规则 {sorted(used)[0]}")
+
+    rejected = sorted(c for c in used if c in REJECTED_COLLATIONS)
+    if rejected:
+        bad(f"使用了已拒绝的排序规则 {rejected}")
+        print("         → general_ci 是最老的 UCA，连 cafe 与 café 都视为相等；")
+        print("           库与表的默认值可能就是它，必须显式覆盖")
+
+    unknown = sorted(c for c in used if c not in ALLOWED_COLLATIONS)
+    if unknown:
+        bad(f"出现白名单之外的排序规则 {unknown}")
+        print(f"         → 允许的: {sorted(ALLOWED_COLLATIONS)}")
+        print("         → 新增白名单项前，先到实际实例上实测它的等价语义")
+            
+    # 建库语句里的规则也必须与表一致，否则库与表会对不上
+    m_db = re.search(r"DEFAULT CHARACTER SET\s+(\w+)\s+COLLATE\s+(\w+)", sql)
+    if not m_db:
+        bad("建库语句未显式声明 COLLATE——库会跟随服务端默认值")
+    else:
+        db_coll = m_db.group(2)
+        if used and db_coll not in used:
+            bad(f"建库语句的 {db_coll} 与表的 {sorted(used)} 不一致"
+                f"——库默认值与表实际规则对不上")
+        else:
+            ok(f"建库语句与表使用同一排序规则 {db_coll}")
+
+    # 服务端专有排序规则的可移植性提醒（仅提示，不是错误：
+    # 服务端已从 5.7 迁到 8.4，900 是预期选择）
     m0900 = sorted(set(re.findall(r"utf8mb4_0900\w*", sql)))
     if m0900:
-        bad(f"文件（含注释）出现 8.0 专有排序规则 {m0900}——在 5.7 上执行会报 Unknown collation")
-    else:
-        ok("文件全文（含注释）无 8.0 专有排序规则")
+        print(f"  [ 注意 ] 使用了 8.0+ 专有排序规则 {m0900}")
+        print("          → 这是预期选择（服务端 8.4.4）。但如果拿到 5.7 实例上")
+        print("            执行，建表会报 ERROR 1273 Unknown collation。")
 
     # ---------------------------------------------------------------- 业务表
     head("5. 业务表设计要点")

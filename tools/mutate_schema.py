@@ -97,14 +97,44 @@ def _directed_friendship(sql: str, yaml: str):
                        "PRIMARY KEY (`actor_a`)"), yaml
 
 
-def _collation_8_only(sql: str, yaml: str):
-    """表级排序规则换成 8.0 专有值 —— 在 5.7 上建表报 Unknown collation。"""
-    return sql.replace("COLLATE=utf8mb4_unicode_ci", "COLLATE=utf8mb4_0900_ai_ci"), yaml
+def _collation_rejected(sql: str, yaml: str):
+    """排序规则换成 general_ci —— 最老的 UCA，cafe 与 café 被视为相等。
+
+    这正是本实例服务端默认值，也是“不显式写 COLLATE”会落入的坑。
+    """
+    return sql.replace("COLLATE=utf8mb4_0900_ai_ci", "COLLATE=utf8mb4_general_ci"), yaml
+
+
+def _collation_unknown(sql: str, yaml: str):
+    """排序规则换成白名单之外的名字 —— 防止引入未实测过的新规则。
+
+    刻意用一个**真实存在但未入白名单**的值（0900_as_cs：重音与大小写均敏感），
+    而不是凭空造一个不存在的名字。不存在的名字会被服务端拒绝，
+    那验的是服务端，不是我们的白名单。
+    """
+    return sql.replace("COLLATE=utf8mb4_0900_ai_ci", "COLLATE=utf8mb4_0900_as_cs"), yaml
+
+
+def _collation_mixed(sql: str, yaml: str):
+    """只把一张表换成另一种规则 —— 同一个库里混用会在跨表 JOIN 时报
+    Illegal mix of collations。注意只替 1 处，全替就变成“统一换了”。"""
+    return sql.replace("COLLATE=utf8mb4_0900_ai_ci",
+                       "COLLATE=utf8mb4_bin", 1), yaml
 
 
 def _collation_missing(sql: str, yaml: str):
-    """去掉表级 COLLATE —— 排序规则随 MySQL 版本漂移。"""
-    return sql.replace(" COLLATE=utf8mb4_unicode_ci", ""), yaml
+    """去掉表级 COLLATE —— 排序规则随服务端配置漂移。"""
+    return sql.replace(" COLLATE=utf8mb4_0900_ai_ci", ""), yaml
+
+
+def _collation_db_mismatch(sql: str, yaml: str):
+    """只改建库语句的规则 —— 库默认值与表实际规则对不上。
+
+    注释里是 `COLLATE utf8mb4_0900_ai_ci;`（空格），
+    表定义里是 `COLLATE=utf8mb4_0900_ai_ci`（等号），两者不是同一串。
+    """
+    return sql.replace("COLLATE utf8mb4_0900_ai_ci;",
+                       "COLLATE utf8mb4_unicode_ci;"), yaml
 
 
 def _yaml_wrong_key(sql: str, yaml: str):
@@ -118,16 +148,6 @@ def _yaml_shard_mismatch(sql: str, yaml: str):
                      .replace("conv_id % 16", "conv_id % 8"))
 
 
-def _comment_only_8_collation(sql: str, yaml: str):
-    """只在注释里留下 8.0 排序规则 —— 用户复制注释里的语句就会踩。
-
-    注意注释里是 `COLLATE utf8mb4_unicode_ci;`（空格），
-    表定义里是 `COLLATE=utf8mb4_unicode_ci`（等号），两者不是同一串。
-    """
-    return sql.replace("COLLATE utf8mb4_unicode_ci;",
-                       "COLLATE utf8mb4_0900_ai_ci;"), yaml
-
-
 MUTATIONS = [
     ("idem_key_drops_shard_col", "幂等唯一键去掉分片列 conv_id",   _drop_conv_from_idem),
     ("pk_drops_shard_col",       "主键去掉分片列 conv_id",         _pk_drop_conv),
@@ -138,9 +158,11 @@ MUTATIONS = [
     ("missing_business_table",   "删掉一张业务表",                  _drop_business_table),
     ("shard_count_not_pow2",     "分片表数不是 2 的幂",              _drop_one_shard_table),
     ("directed_friendship_pk",   "好友表主键变单向",                _directed_friendship),
-    ("collation_8_0_only",       "排序规则用 8.0 专有值",            _collation_8_only),
+    ("collation_rejected",       "排序规则用被拒绝的 general_ci",    _collation_rejected),
+    ("collation_unknown",        "排序规则不在白名单内",             _collation_unknown),
+    ("collation_mixed",          "同库混用两种排序规则",             _collation_mixed),
     ("collation_missing",        "缺少表级 COLLATE",                 _collation_missing),
-    ("collation_in_comment",     "注释里残留 8.0 排序规则",          _comment_only_8_collation),
+    ("collation_db_mismatch",    "建库规则与表规则不一致",           _collation_db_mismatch),
     ("yaml_wrong_key_name",      "YAML 错用 dataNodes 键名",         _yaml_wrong_key),
     ("yaml_shard_count_mismatch","YAML 与 DDL 分片数不一致",         _yaml_shard_mismatch),
 ]

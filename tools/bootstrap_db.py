@@ -59,6 +59,17 @@ def split_statements(sql: str) -> list[str]:
     return out
 
 
+def expected_collation(schema_sql: str) -> str | None:
+    """从建表脚本里读出预期的排序规则，而不是在本文件里再写一份。
+
+    这两处曾经确实各写了一份而且不一致（本文件写 0900_ai_ci，
+    gen_schema.py 生成 unicode_ci），后果是库与表的排序规则不同，
+    跨表 JOIN 会报 Illegal mix of collations。所以只保留一个真源。
+    """
+    m = re.search(r"DEFAULT CHARACTER SET\s+(\w+)\s+COLLATE\s+(\w+)", schema_sql)
+    return m.group(2) if m else None
+
+
 def main() -> int:
     ap = argparse.ArgumentParser(description="tm_im M0 数据库引导")
     ap.add_argument("--env", help="配置文件路径")
@@ -74,6 +85,10 @@ def main() -> int:
 
     schema_sql = SCHEMA.read_text(encoding="utf-8")
     stmts = split_statements(schema_sql)
+    want_coll = expected_collation(schema_sql)
+    if not want_coll:
+        print("错误：建表脚本里找不到 DEFAULT CHARACTER SET ... COLLATE ...")
+        return 1
 
     # 去掉 USE 和 SET，它们由脚本按连接需要单独处理
     body_stmts = [s for s in stmts
@@ -96,7 +111,9 @@ def main() -> int:
     # ---------------------------------------------------------------- dry-run
     if args.dry_run or not (args.apply or args.verify_only):
         head("将要执行的语句")
-        print(f"  CREATE DATABASE IF NOT EXISTS `{db}` CHARACTER SET utf8mb4;")
+        print(f"  CREATE DATABASE IF NOT EXISTS `{db}` "
+              f"CHARACTER SET utf8mb4 COLLATE {want_coll};")
+        print(f"  （若库已存在但排序规则不是 {want_coll}，则先 ALTER DATABASE 纠正）")
         print(f"  （{len(create_stmts)} 条 CREATE TABLE）")
         for s in create_stmts[:3]:
             print(f"    {s.splitlines()[0].strip()}")
@@ -149,11 +166,51 @@ def main() -> int:
         ver = cur.fetchone()[0]
         ok(f"MySQL {ver}")
 
-        cur.execute("SELECT SCHEMA_NAME FROM information_schema.SCHEMATA WHERE SCHEMA_NAME=%s", (db,))
-        exists = cur.fetchone() is not None
+        # 排序规则是否被服务端支持——在 5.7 上建 0900 表会直接报 1273，
+        # 而错误发生在第一条 CREATE TABLE，前面看着一切正常，容易误判。
+        cur.execute("SELECT COUNT(*) FROM information_schema.COLLATIONS "
+                    "WHERE COLLATION_NAME=%s", (want_coll,))
+        if cur.fetchone()[0]:
+            ok(f"服务端支持预期排序规则 {want_coll}")
+        else:
+            bad(f"服务端不支持 {want_coll} —— 大概指向了 5.7 旧实例；"
+                f"请确认 MYSQL_PORT 是 13306（8.4）而不是 3306（5.7）")
+            conn.close()
+            return 1
+
+        cur.execute("SELECT DEFAULT_COLLATION_NAME FROM information_schema.SCHEMATA "
+                    "WHERE SCHEMA_NAME=%s", (db,))
+        row = cur.fetchone()
+        exists = row is not None
+        cur_coll = row[0] if row else None
 
         if exists:
-            ok(f"库 `{db}` 已存在")
+            ok(f"库 `{db}` 已存在（collation={cur_coll}）")
+            if cur_coll != want_coll:
+                # 关键：CREATE DATABASE IF NOT EXISTS 对已存在的库是空操作，
+                # 不会修改它的排序规则，必须 ALTER 才能纠正。
+                cur.execute("SELECT COUNT(*) FROM information_schema.TABLES "
+                            "WHERE TABLE_SCHEMA=%s", (db,))
+                n_tables = cur.fetchone()[0]
+                if args.verify_only:
+                    bad(f"库排序规则为 {cur_coll}，与预期 {want_coll} 不一致"
+                        f"（verify-only 不修改）")
+                elif n_tables == 0:
+                    try:
+                        cur.execute(f"ALTER DATABASE `{db}` CHARACTER SET utf8mb4 "
+                                    f"COLLATE {want_coll}")
+                        ok(f"已纠正库排序规则 {cur_coll} → {want_coll}（库为空，瞬时完成）")
+                    except Exception as e:
+                        bad(f"ALTER DATABASE 失败: {cs.sanitize(e, secrets)}")
+                else:
+                    bad(f"库排序规则为 {cur_coll}，与预期 {want_coll} 不一致，"
+                        f"但库中已有 {n_tables} 张表")
+                    print("         → 不自动改（ALTER DATABASE 只改默认值，")
+                    print("           已存在表的规则不变，留着会更难查）")
+                    print(f"         → 需要 DBA 执行： ALTER DATABASE `{db}` "
+                          f"CHARACTER SET utf8mb4 COLLATE {want_coll};")
+                    conn.close()
+                    return 1
         elif args.verify_only:
             bad(f"库 `{db}` 不存在（verify-only 不创建）")
             conn.close()
@@ -161,13 +218,14 @@ def main() -> int:
         else:
             try:
                 cur.execute(f"CREATE DATABASE IF NOT EXISTS `{db}` "
-                            f"DEFAULT CHARACTER SET utf8mb4 DEFAULT COLLATE utf8mb4_0900_ai_ci")
-                ok(f"已创建库 `{db}`")
+                            f"DEFAULT CHARACTER SET utf8mb4 DEFAULT COLLATE {want_coll}")
+                ok(f"已创建库 `{db}`（collation={want_coll}）")
             except Exception as e:
                 bad(f"建库失败: {cs.sanitize(e, secrets)}",
                     )
                 print("         → 需要 DBA 执行：")
-                print(f"           CREATE DATABASE `{db}` DEFAULT CHARACTER SET utf8mb4;")
+                print(f"           CREATE DATABASE `{db}` DEFAULT CHARACTER SET utf8mb4 "
+                      f"DEFAULT COLLATE {want_coll};")
                 conn.close()
                 return 1
     conn.close()
@@ -219,6 +277,20 @@ def main() -> int:
 
     # 关键约束是否真的落到库里（而不是只写在 SQL 文件里）
     with conn.cursor() as cur:
+        # 排序规则必须逐表落实。库的默认值只影响日后新建的表，
+        # 已经建好的表不会跟着变，所以必须直接问表自己。
+        cur.execute("SELECT TABLE_NAME, TABLE_COLLATION FROM information_schema.TABLES "
+                    "WHERE TABLE_SCHEMA=%s", (db,))
+        colls = {t: c for t, c in cur.fetchall()}
+        wrong_coll = {t: c for t, c in colls.items() if c != want_coll}
+        if wrong_coll:
+            bad(f"以下表的排序规则不是 {want_coll}:")
+            for t, c in sorted(wrong_coll.items())[:5]:
+                print(f"         {t}: {c}")
+            print("         → 这类不一致会在跨表 JOIN 时报 Illegal mix of collations")
+        else:
+            ok(f"{len(colls)} 张表的排序规则均为 {want_coll}")
+
         cur.execute("""
             SELECT table_name, index_name, GROUP_CONCAT(column_name ORDER BY seq_in_index) cols,
                    non_unique
@@ -321,13 +393,35 @@ def main() -> int:
                     bad("主键未拦截同 (conv_id, seq) 重复")
 
                 # 顺序读（拉历史走主键聚簇索引）
-                cur.execute(f"SELECT conv_id, seq FROM `{tname}` WHERE conv_id=%s ORDER BY seq",
-                            (conv_id,))
-                rows = cur.fetchall()
-                if rows == [(conv_id, 1)]:
-                    ok("按 (conv_id, seq) 范围查询返回正确结果")
+                #
+                # 两条断言，都是被本次首跑发现的：
+                #  1) pymysql 默认游标的 fetchall() 返回的是 tuple of tuples，
+                #     拿它和 list 比较永远为假。原写法 rows == [(conv_id, 1)]
+                #     在本脚本第一次真连上库时直接报失败，而数据其实是对的。
+                #  2) 执行到这里时表里只有 1 行，ORDER BY 根本没被验证。
+                #     移到插入 seq=2 之后，并乱序插入以真正考验排序。
+                cur.execute(f"SELECT seq FROM `{tname}` WHERE conv_id=%s ORDER BY seq", (conv_id,))
+                seqs = [r[0] for r in cur.fetchall()]
+                if seqs != [1]:
+                    bad(f"单行范围查询结果异常: {seqs!r}（期望 [1]）")
+
+                # 插入 seq=0（比现有行小），验证 ORDER BY 而不仅是“只有一行”
+                cur.execute(
+                    f"INSERT INTO `{tname}` (id, conv_id, seq, sender_id, msg_type, content, "
+                    f"client_msg_id, created_at) VALUES (%s,%s,%s,%s,1,%s,%s,NOW(3))",
+                    (910000000000000005, conv_id, 0, 900000000000000001,
+                     '{"text":"order probe"}', f"{tag}-c0"))
+                cur.execute(f"SELECT seq FROM `{tname}` WHERE conv_id=%s ORDER BY seq", (conv_id,))
+                seqs = [r[0] for r in cur.fetchall()]
+                if seqs == [0, 1]:
+                    ok(f"按 (conv_id, seq) 范围查询有序返回: {seqs}（聚簇主键生效）")
                 else:
-                    bad(f"范围查询结果异常: {rows}")
+                    bad(f"范围查询顺序异常: {seqs!r}（期望 [0, 1]）")
+
+                # 跨会话隔离：同表内其他 conv_id 不应被查出
+                cur.execute(f"SELECT COUNT(*) FROM `{tname}` WHERE conv_id=%s", (conv_id + 16,))
+                if cur.fetchone()[0] == 0:
+                    ok("conv_id 隔离生效：同一物理表内其他会话的行不被查出")
 
                 # JSON 列可写可读
                 cur.execute(f"SELECT content->>'$.text' FROM `{tname}` WHERE conv_id=%s AND seq=1",

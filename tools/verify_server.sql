@@ -125,8 +125,9 @@ FROM information_schema.SCHEMATA
 WHERE SCHEMA_NAME = 'tm_im';
 
 -- 若库已存在且排序规则与建表脚本不一致，跨表 JOIN 会报
--- Illegal mix of collations。建表脚本使用 utf8mb4_unicode_ci，
--- 它在 5.7 与 8.0 上均存在。
+-- Illegal mix of collations。建表脚本使用 utf8mb4_0900_ai_ci
+-- （MySQL 8.0+ 专有；当前服务端 8.4.4）。
+-- 旧 5.7 实例上应改用 --collation utf8mb4_unicode_ci 重新生成。
 
 
 SELECT '=== 7. 库内现有表 ===' AS section;

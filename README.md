@@ -112,24 +112,51 @@ yaml_shard_count_mismatch    已捕获   分片数不一致：yaml=8 DDL=16
 
 ### 排序规则为什么必须显式写
 
-当前外部库是 **MySQL 5.7**。只写 `DEFAULT CHARSET=utf8mb4` 而不写 `COLLATE` 时，
-排序规则取"该字符集的默认值"，而这个默认值随服务端大版本变化：
+当前目标实例是 **MySQL 8.4.4（端口 13306）**；旧的 5.7.44 实例仍在 3306，但已不再使用。只写 `DEFAULT CHARSET=utf8mb4` 而不写 `COLLATE` 时，
+排序规则取"该字符集的默认值"，而这个默认值随服务端**版本与配置**变化：
 
 | 服务端 | `CHARSET=utf8mb4` 的默认排序规则 |
 |---|---|
 | MySQL 5.7 | `utf8mb4_general_ci` |
-| MySQL 8.0 | `utf8mb4_0900_ai_ci` |
+| MySQL 8.0+ | `utf8mb4_0900_ai_ci` |
 
-后果是同一份脚本在不同版本上建出的表排序规则不同，跨表 JOIN 可能报
-`Illegal mix of collations`，迁移时出现难以定位的排序差异。
-所以 25 张表统一显式声明 `COLLATE=utf8mb4_unicode_ci`——它在 5.7 与 8.0 上都存在，
-而 `utf8mb4_0900_*` 是 8.0 专有，在 5.7 上执行会直接报 `Unknown collation`。
+后果是同一份脚本在不同环境建出的表排序规则不同，跨表 JOIN 可能报
+`Illegal mix of collations`，迁移时出现难以定位的排序差异。因此 25 张表
+统一显式声明排序规则，并且 `verify_schema.py` 会断言**全库只有一种规则**——
+混用比用错更难查。
 
-若库已存在且用 8.0 默认排序规则建库，可对齐（代价是失去 5.7 兼容性）：
+当前使用 `utf8mb4_0900_ai_ci`。目标实例已从 5.7（`3306`）迁至
+**MySQL 8.4.4（`13306`）**，原先为兼容 5.7 而选 `utf8mb4_unicode_ci` 的理由已消失：
+
+| 排序规则 | UCA 版本 | 5.7 可用 | 备注 |
+|---|---|---|---|
+| `utf8mb4_general_ci` | 最早 | ✅ | 连 `cafe` 与 `café` 都视为相等，已列入拒绝名单 |
+| `utf8mb4_unicode_ci` | 4.0.0 | ✅ | 为 5.7 兼容保留的备选 |
+| `utf8mb4_0900_ai_ci` | 9.0.0 | ❌ | **当前选择**；消息正文是自由文本，需要现代 UCA |
+
+等价语义差异不靠记忆判断：`tools/probe_collation.py` 在**实际实例上**逐对实测
+（`uv run --with pymysql python tools/probe_collation.py`）：
+
+```
+  排序规则              仅大小写不同   重音差异   ss/ß 折叠   ae/æ 折叠
+  utf8mb4_unicode_ci   相等          相等       相等        不等
+  utf8mb4_0900_ai_ci   相等          相等       相等        相等
+```
+
+这些差异看起来会让 `handle` 唯一索引变得危险（`strasse` 与 `straße` 会撞），
+但 handle 的校验规则是 3-32 位字母数字下划线（`docs/integration/02-auth.md`，
+错误码 `40004`），即**纯 ASCII**。非 ASCII 的 handle 根本进不了库，
+所以这些差异对 `uk_handle` 不产生任何实际影响。
+
+换环境时用 `--collation` 重新生成（例如拿到 5.7 实例）：
 
 ```bash
-python tools/gen_schema.py --collation utf8mb4_0900_ai_ci   # 会打印兼容性警告
+uv run python tools/gen_schema.py --collation utf8mb4_unicode_ci   # 回到 5.7 可用的规则
 ```
+
+> 客户端配置同理：`deploy/conf/local-conn.env` 的 `MYSQL_PORT` 必须指向 8.4 实例（`13306`）。
+> 若误指回 `3306`，`bootstrap_db.py` 会在建表前就报出“服务端不支持该排序规则”，
+> 而不是等到第一条 `CREATE TABLE` 才抛 `ERROR 1273`。
 
 ### 服务端真实版本怎么确认
 
@@ -208,6 +235,7 @@ uv run --with pymysql --with cryptography python tools/diag_conn.py
 的全球节点从完全独立的视角复核（同时带上一个已知可用的对照端口）：
 
 ```
+—— 以下为 2026-09 修复前的实测输出，保留作为方法演示 ——
 ── 端口 3306 ──  14/14 节点可连     ← 对照：同主机的 MySQL
 ── 端口 6379 ──   0/14 节点可连     ← 11 个节点明确收到 Connection refused
 
@@ -217,6 +245,9 @@ uv run --with pymysql --with cryptography python tools/diag_conn.py
 
 奥地利、加拿大、伊朗、以色列、葡萄牙、俄罗斯、新加坡、英国、乌克兰的服务器
 **全都收到 RST**，这才排除了本机干扰。加 `--no-external` 可关闭此步骤。
+
+> **后续**：服务器侧重启后 Redis 已正常监听，当前 `AUTH` + `PING` 均通过
+> （Redis 7.4.2）。这段输出现在只剩“方法可复现”的价值，不再代表当前状态。
 
 > 注意：`v2ray` 的 SOCKS 代理**不能**用来验证连通性。实测它对
 > 确定关闭的端口（`1433`/`9999`/随机高位端口）也立即返回 `CONNECTED`（0-18ms），
