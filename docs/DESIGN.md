@@ -74,7 +74,7 @@ M0 的验收标准从"本机起库"改为：**用你给的连接信息连通 MyS
 | **长连接** | **自研 Netty 4.1.135.Final**（独立端口，嵌入同一 JVM） |
 | ORM | **MyBatis-Plus 3.5.17**（`mybatis-plus-spring-boot3-starter`） |
 | 分库分表 | **ShardingSphere-JDBC 5.5.3**（以 **JDBC 驱动**方式接入） |
-| 关系库 | **MySQL 8.x**（外部提供） |
+| 关系库 | **MySQL 5.7 / 8.0**（外部提供；现网为 **5.7.44**） |
 | 缓存/在线态/路由/seq | **Redis**（外部提供，Lettuce 客户端） |
 | 连接池 | HikariCP（ShardingSphere 内置捆绑） |
 | 序列号 | 应用层 **Snowflake**（自研，非 ShardingSphere keygen） |
@@ -270,7 +270,7 @@ flowchart TB
   end
 
   subgraph INFRA["外部基础设施（你提供）"]
-    MY[("MySQL 8<br/>ShardingSphere 分片")]
+    MY[("MySQL 5.7/8.0<br/>ShardingSphere 分片")]
     RD[("Redis<br/>路由/seq/在线态")]
     MQ[("消息总线<br/>本地队列 → Kafka")]
     OSS[("对象存储<br/>本地FS → S3/OSS")]
@@ -447,6 +447,7 @@ MySQL **单表撑不住 IM 消息写入量**：消息是**写密集、只增不�
 已反编译核实 5.5.3 的配置键为 **`actualDataNodes`**（**不是** `dataNodes`）：
 
 ```yaml
+# 完整模板见 deploy/conf/sharding.yaml.example（经 tools/validate_yaml.py 校验）
 dataSources:
   ds_0:
     dataSourceClassName: com.zaxxer.hikari.HikariDataSource
@@ -538,6 +539,12 @@ PRIMARY KEY (conv_id, seq)   -- 包含分片列，保证同会话聚簇
 ---
 
 ## 9. 统一领域模型（MySQL DDL）
+
+> **单一事实来源**：下文的 DDL 为**设计说明**。可执行脚本由 `tools/gen_schema.py` 生成到
+> `deploy/sql/01-schema.sql`，其中 16 张 `message_N` 分片表由模板展开，**不存在手写漂移**。
+> 两者由 `tools/verify_schema.py` 断言一致（分片数、分片列、幂等键、引擎、字符集）。
+>
+> 改结构时：**改生成器** → 重跑 `python tools/gen_schema.py` → 本节同步更新。
 
 ### 9.1 参与者（人与 Agent 同构）
 

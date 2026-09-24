@@ -37,7 +37,7 @@
 
 - **后端**：Java 17 + Spring Boot 3.5.16 + MyBatis-Plus + **ShardingSphere-JDBC 5.5.3**
 - **长连接**：**自研 Netty 4.1.x**（Protobuf 二进制帧）
-- **存储**：MySQL 8（按 `conv_id` 分片）+ Redis
+- **存储**：MySQL 5.7 / 8.0（现网 5.7.44，按 `conv_id` 分片）+ Redis
 - **前端**：Vue 3 + Vite + TypeScript
 - **交付**：用户端、管理后台各为**一个可执行 JAR**
 
@@ -46,27 +46,83 @@
 ```
 docs/     设计文档 + 接入文档
 deploy/   配置模板（sharding.yaml / application-external.yml）
+deploy/sql/  建表脚本（由 tools/gen_schema.py 生成，勿手改）
 proto/    长连接协议定义（transport.proto，可直接 protoc 编译）
-tools/    校验与样本生成脚本
+tools/    校验、生成与引导脚本
 server/   后端（规划中）
 web/      前端（规划中）
 sdk/      Agent SDK（规划中）
 ```
 
-## 文档自检
+## 自检
 
-接入文档中的字节样本与签名向量都是**机器生成并校验**的，可自行复现：
+一条命令跑完所有验证：
 
 ```bash
-uv run --with protobuf --with pyyaml python tools/verify_integration_docs.py
+uv run --with protobuf --with pyyaml --with sqlglot python tools/verify_all.py
 ```
 
-该脚本会：
+| 检查项 | 内容 |
+|---|---|
+| `schema` | 建表 SQL 语法 + **分片语义约束**（主键/幂等键必须含分片列） |
+| `docs` | 接入文档字节样本与签名向量 |
+| `yaml` | 配置模板可解析 |
+| `samples` | Webhook 签名测试向量 |
+| `mutate` | **变异测试**：验证校验器真的能抓到错误 |
 
-1. 校验文档中所有 hex 字节块与 `protoc` 官方编码**逐字节一致**
-2. **抽取文档里的手写 protobuf 实现并运行**，断言其输出与官方编码相同
-3. 校验所有 JSON 代码块语法合法
-4. 校验文档间链接都存在
+### 建表 SQL 为什么是生成的
+
+`deploy/sql/01-schema.sql` **不要手工编辑**。16 张分片表结构必须完全一致，
+手写 16 遍必然漂移，而漂移在 ShardingSphere 下不会报错，只会在某个分片上静默丢约束。
+
+```bash
+python tools/gen_schema.py              # 重新生成
+python tools/gen_schema.py --check      # 校验已生成文件是否为当前定义
+uv run --with sqlglot python tools/verify_schema.py   # 深度校验
+```
+
+校验器经过**变异测试**（`tools/mutate_schema.py`）：向正确的建表脚本里注入 14 类真实错误，
+断言每一类都被拦下。为什么需要它——一个只会输出 OK 的校验器，和一个什么都抓不到的校验器，
+在正常代码上表现完全一样，区别只在注入错误时才显现：
+
+```bash
+uv run --with sqlglot python tools/mutate_schema.py
+```
+
+```
+idem_key_drops_shard_col     已捕获   幂等唯一键未含分片列
+pk_drops_shard_col           已捕获   主键未含分片列 conv_id
+one_shard_table_drift        已捕获   检测到 2 种不同结构 —— 有表结构漂移
+second_precision_time        已捕获   created_at 用了秒级精度
+myisam_engine                已捕获   非 InnoDB
+utf8_instead_of_utf8mb4      已捕获   非 utf8mb4
+missing_business_table       已捕获   缺少业务表
+shard_count_not_pow2         已捕获   分片数 15 不是 2 的幂
+directed_friendship_pk       已捕获   friendship 主键设计错误
+collation_8_0_only           已捕获   使用了版本专有排序规则
+collation_missing            已捕获   25 张表未显式声明 COLLATE
+collation_in_comment         已捕获   文件（含注释）出现 8.0 专有排序规则
+yaml_wrong_key_name          已捕获   无法从 sharding.yaml 解析 actualDataNodes
+yaml_shard_count_mismatch    已捕获   分片数不一致：yaml=8 DDL=16
+```
+
+若变异**未生效**（目标文本没找到），脚本会直接报错而不是静默跳过——
+否则一个写错了的变异会伪装成"校验器很厉害"。
+
+### 排序规则为什么必须显式写
+
+当前外部库是 **MySQL 5.7**。只写 `DEFAULT CHARSET=utf8mb4` 而不写 `COLLATE` 时，
+排序规则取"该字符集的默认值"，而这个默认值随服务端大版本变化：
+
+| 服务端 | `CHARSET=utf8mb4` 的默认排序规则 |
+|---|---|
+| MySQL 5.7 | `utf8mb4_general_ci` |
+| MySQL 8.0 | `utf8mb4_0900_ai_ci` |
+
+后果是同一份脚本在不同版本上建出的表排序规则不同，跨表 JOIN 可能报
+`Illegal mix of collations`，迁移时出现难以定位的排序差异。
+所以 25 张表统一显式声明 `COLLATE=utf8mb4_unicode_ci`——它在 5.7 与 8.0 上都存在，
+而 `utf8mb4_0900_*` 是 8.0 专有，在 5.7 上执行会直接报 `Unknown collation`。
 
 ## 配置
 
@@ -96,12 +152,49 @@ uv run --with pymysql --with redis python tools/check_services.py
 会验证：TCP 可达性、MySQL 认证与版本、InnoDB / 建表权限 / 时区 / 隔离级别、
 Redis 版本与 `INCR`（seq 生成）、`PUBLISH`（跨节点推送）等本方案强依赖的能力。
 
+连接失败时用 `tools/diag_conn.py` 定位**为什么**失败——它区分四类性质完全不同的问题：
+
+```bash
+uv run --with pymysql --with cryptography python tools/diag_conn.py
+```
+
+| 现象 | 含义 | 该做什么 |
+|---|---|---|
+| 基线（RFC5737 保留段）也"可连" | 本机网络有透明代理 | TCP 探测不可信，只认协议层握手 |
+| TCP 超时（无响应） | 端口被防火墙过滤，或服务只 bind 127.0.0.1 | 查安全组 / `bind` 配置 |
+| TCP 立即 refused | 该地址上确实没有服务监听 | 启动服务或改 `bind 0.0.0.0` |
+| 拿到真实握手包但认证被拒 | **网络没问题，是凭据/账号问题** | MySQL `1130`=IP 未授权；`1045`=密码或用户名错 |
+
 两个容易被忽略的点，脚本已内置处理：
 
 - **透明拦截**：先用 RFC5737 保留段（`192.0.2.1:1`，公网必不可能路由）做基线。
   若基线也报"可连"，说明本机网络存在透明代理，此时 **TCP 可达不能证明服务存在**，
   脚本会把 TCP 结果降级为警告，只以协议层握手（MySQL 认证 / Redis PING）作为通过依据。
 - **密码泄漏**：所有输出中密码自动脱敏，异常信息中的回显也会被替换。
+
+## M0 建库建表
+
+```bash
+# 1. 先看要执行什么（不连库）
+python tools/bootstrap_db.py --dry-run
+
+# 2. 真正执行（建库 → 25 张表 → 验证 → 冒烟测试）
+uv run --with pymysql python tools/bootstrap_db.py --apply
+
+# 3. 只验证已有库
+uv run --with pymysql python tools/bootstrap_db.py --verify-only
+```
+
+冒烟测试会在**事务内**写入并回滚，验证这些事：
+
+- 人与 Agent 写入**同一张 `actor` 表**（对等模型的物理验证）
+- `conv_id=100` 按 `%16` 路由到 `message_4`
+- 重复 `(conv_id, sender_id, client_msg_id)` **被唯一键拒绝**
+- 同 `(conv_id, seq)` 重复插入被主键拒绝
+- 中文与 emoji 🎉 往返无损（utf8mb4 真的生效）
+- `content->>'$.text'` JSON 提取正常
+
+全程**不做 DROP / TRUNCATE / DELETE**。
 
 ## License
 
