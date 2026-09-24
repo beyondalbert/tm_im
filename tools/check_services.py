@@ -90,8 +90,14 @@ def bad(msg: str, hint: str | None = None) -> None:
         print(f"         {DIM(arrow + ' ' + hint)}")
     FAILED.append(msg)
 
-def warn(msg: str) -> None:
+def warn(msg: str, hint: str | None = None) -> None:
+    # hint 与 bad() 保持一致：调用方想写出「怎么解决」时不该被参数个数堵住。
+    # 这里曾经只收一个参数，而 redis 分支按两个参数调用它 —— 那条路径
+    # （未安装 redis 包时）一跑就抛 TypeError，但平时没人走到，所以藏了很久。
     print(f"  [{WARN('WARN')}] {msg}")
+    if hint:
+        arrow = "\u2192" if UNICODE_OK else "->"
+        print(f"         {DIM(arrow + ' ' + hint)}")
     WARNED.append(msg)
 
 def info(msg: str) -> None:
@@ -248,7 +254,10 @@ def check_mysql(cfg: dict[str, str], secrets: list[str]) -> dict | None:
         bad("缺少 pymysql", "uv run --with pymysql --with redis python tools/check_services.py")
         return None
 
-    # 先不带库连（库可能还没建）
+    # 先不带库连（库可能还没建），失败再试直连目标库。
+    # 注意：不带库连成功时不会再去试第二个，因此后面所有「与库相关」的
+    # 检查都必须在确认库存在后自己切库 —— 否则它们要么拿到
+    # `1046 No database selected`，要么整段静默跳过。
     conn = None
     for connect_db in (None, db):
         label = "无库连接" if connect_db is None else f"指定库 `{connect_db}`"
@@ -292,18 +301,43 @@ def check_mysql(cfg: dict[str, str], secrets: list[str]) -> dict | None:
             row = cur.fetchone()
             keys = ["lower_case_table_names", "storage_engine", "charset_server",
                     "collation_server", "max_connections", "sql_mode", "time_zone",
-                    "tx_isolation"]
-            for k, v in zip(keys, row):
+                    "transaction_isolation"]
+            # 先校一下列数：以前这里用 row[8] 取隔离级别，而查询只选了 8 列（0..7），
+            # 于是从这一行开始往下的全部检查（InnoDB/授权/现有表/写入探测）
+            # 都被一个 IndexError 跳过，而汇总结论看上去只是「探测过程出错」。
+            # 改成按名字取值后，这种错位不会再发生；万一以后列数对不上，
+            # 就直接报出来，而不是静默地少查几项。
+            if len(row) != len(keys):
+                raise RuntimeError(
+                    f"SHOW 变量返回 {len(row)} 列，期望 {len(keys)} 列："
+                    f"请同步更新 keys 列表（否则后面的检查会被静默跳过）")
+            values = dict(zip(keys, row))
+            for k, v in values.items():
                 info(f"{k} = {v}")
 
-            lower = row[0]
+            # 目标库是否存在，并切过去。
+            # 不显式切库的后果实测过两种：临时表探测报
+            # `1046 No database selected`（于是「有没有写入权限」这个问题根本没被回答），
+            # 以及「列出库里现有的表」那段因为连接没选库而永远不会执行。
+            cur.execute("SELECT COUNT(*) FROM information_schema.SCHEMATA "
+                        "WHERE SCHEMA_NAME=%s", (db,))
+            db_exists = cur.fetchone()[0] > 0
+            if db_exists:
+                conn.select_db(db)
+                ok(f"已切到目标库 `{db}`")
+            else:
+                warn(f"库 `{db}` 还不存在 —— 与库相关的检查（现有表/写入探测）会跳过")
+
+            lower = values["lower_case_table_names"]
             if lower == 1:
                 warn("lower_case_table_names=1（表名大小写不敏感）—— Linux 部署环境下迁移需注意")
             elif lower == 0:
                 ok("lower_case_table_names=0（大小写敏感，符合 Linux 生产惯例）")
 
-            if str(row[8]).upper().replace("-", " ") not in ("REPEATABLE READ",):
-                info(f"隔离级别为 {row[8]}（默认 REPEATABLE-READ 更适合本场景）")
+            # 注：旧版 MySQL 叫 tx_isolation，5.7.20+ / 8.0 叫 transaction_isolation
+            iso = str(values["transaction_isolation"])
+            if iso.upper().replace("-", " ") not in ("REPEATABLE READ",):
+                info(f"隔离级别为 {iso}（默认 REPEATABLE-READ 更适合本场景）")
 
             # 时区问题最容易导致 seq/时间戳错乱
             try:
@@ -346,7 +380,7 @@ def check_mysql(cfg: dict[str, str], secrets: list[str]) -> dict | None:
                     warn("MYSQL_ALLOW_DDL=true 但未见 *.* 级 CREATE 权限，建库可能失败")
 
             # 现有表情况
-            if connect_db == db:
+            if db_exists:
                 cur.execute("SELECT COUNT(*) FROM information_schema.tables "
                             "WHERE table_schema=%s", (db,))
                 n = cur.fetchone()[0]
@@ -359,15 +393,18 @@ def check_mysql(cfg: dict[str, str], secrets: list[str]) -> dict | None:
                 else:
                     info("库为空 —— M0 将创建 actor/conversation/message 等表")
 
-            # 探测写入能力（只读事务，不落数据）
-            try:
-                cur.execute("CREATE TEMPORARY TABLE _tm_probe (id INT PRIMARY KEY) "
-                            "ENGINE=InnoDB")
-                cur.execute("INSERT INTO _tm_probe VALUES (1)")
-                cur.execute("DROP TEMPORARY TABLE _tm_probe")
-                ok("临时表写入探测成功（DDL 权限确认）")
-            except Exception as e:
-                warn(f"临时表探测失败（可能无 CREATE TEMPORARY TABLE 权限）: {sanitize(e, secrets)}")
+            # 探测写入能力（临时表，不落数据）
+            if db_exists:
+                try:
+                    cur.execute("CREATE TEMPORARY TABLE _tm_probe (id INT PRIMARY KEY) "
+                                "ENGINE=InnoDB")
+                    cur.execute("INSERT INTO _tm_probe VALUES (1)")
+                    cur.execute("DROP TEMPORARY TABLE _tm_probe")
+                    ok("临时表写入探测成功（CREATE/INSERT 权限确认）")
+                except Exception as e:
+                    warn(f"临时表探测失败（可能无 CREATE TEMPORARY TABLE 权限）: {sanitize(e, secrets)}")
+            else:
+                info("跳过写入探测：库还不存在（建库后重跑本脚本）")
 
             # 分片表数量预估
             info("")

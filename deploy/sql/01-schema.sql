@@ -8,7 +8,7 @@
 -- 分片键：  conv_id
 -- 路由算法：message_${conv_id % 16}
 --
--- 生成指纹：b5abe3b689276734
+-- 生成指纹：deb03d73b2bca10d
 -- ============================================================================
 
 SET NAMES utf8mb4;
@@ -43,12 +43,19 @@ CREATE TABLE IF NOT EXISTS `actor` (
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci COMMENT='唯一参与者表：人/Agent 同构';
 
 -- 凭据隔离到独立表：actor 是高频读取的公开信息，凭据不应与之同页
+--
+-- uk_secret_hash 不是可选项：api_key 里不含 actor_id（格式固定为
+-- sk_live_<随机串>，见 02-auth.md §3.1），服务端只能拿「密钥的哈希」反查
+-- 是哪个 Actor。没有这个唯一索引，每次鉴权都会变成 actor_secret 的全表扫描 ——
+-- 而 actor_secret 是全库唯一一张「每行都对应一个账号」的表，
+-- 长连接场景下它是被查得最频繁的表之一。
 CREATE TABLE IF NOT EXISTS `actor_secret` (
   `actor_id`      BIGINT       NOT NULL,
   `secret_type`   TINYINT      NOT NULL                COMMENT '1=密码哈希 2=API_KEY哈希',
   `secret_hash`   VARCHAR(255) NOT NULL,
   `last_used_at`  DATETIME(3)  NULL,
-  PRIMARY KEY (`actor_id`, `secret_type`)
+  PRIMARY KEY (`actor_id`, `secret_type`),
+  UNIQUE KEY `uk_secret_hash` (`secret_hash`)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci COMMENT='凭据，与人/Agent 无关';
 
 -- Agent 扩展：Human 无此行。owner_actor 防止 Agent 成为孤儿

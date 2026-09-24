@@ -33,8 +33,23 @@ CHECKS = [
     ("errors",   "verify_error_codes.py",       "错误码契约：文档 §2 ↔ 枚举",   "", []),
     ("entities", "gen_entities.py",             "实体与建表 SQL 一致（--check）", "", ["--check"]),
     ("samples",  "verify_doc_samples.py",       "Webhook 签名测试向量",         "", []),
+    # 模板是「运维视角的权威文档」，而代码才是默认值的真正来源。
+    # 两者之间没有任何编译期约束，缺项的表现是「运维照模板配完，服务用的是代码默认值」——
+    # 看起来完全合理，所以必须机器校验。
+    ("config-tmpl", "verify_config_template.py", "配置模板与 @ConfigurationProperties 一致", "pyyaml", []),
     ("mutate",   "mutate_schema.py",            "变异测试：证明校验器不是摆设",   "sqlglot", []),
     ("mutate-deps", "mutate_sharding_deps.py",   "变异测试：缺 ShardingSphere 依赖必被捕获", "", []),
+    ("mutate-cfg", "mutate_config_template.py",  "变异测试：模板校验器的 5 类盲区", "pyyaml", []),
+]
+
+# 需要外部服务（真实 MySQL/Redis）的检查。
+# 单独一组而不是混进 CHECKS：它们在没有凭据的机器上必然失败，
+# 而「因为环境缺失而变红」与「因为代码有问题而变红」必须能区分开。
+SERVICE_CHECKS = [
+    ("runtime-cfg", "gen_runtime_config.py",
+     "运行时配置与当前 local-conn.env 一致（--check）", "", ["--check"]),
+    ("collation",   "probe_collation.py",
+     "实测服务端排序规则等价性（决定 handle 唯一性口径）", "pymysql", []),
 ]
 
 USE_COLOR = sys.stdout.isatty()
@@ -72,14 +87,21 @@ def run_one(name: str, script: str, desc: str, pkg: str,
 def main() -> int:
     ap = argparse.ArgumentParser(description="tm_im 全量自检")
     ap.add_argument("--quick", action="store_true", help="跳过长耗时项")
+    ap.add_argument("--services", action="store_true",
+                    help="额外跑需要外部 MySQL/Redis 的检查（需 deploy/conf/local-conn.env）")
     ap.add_argument("-v", "--verbose", action="store_true", help="失败时打印完整输出")
     args = ap.parse_args()
 
     checks = CHECKS
     if args.quick:
-        checks = [c for c in checks if c[0] not in ("docs", "mutate", "mutate-deps")]
+        checks = [c for c in checks if c[0] not in ("docs", "mutate", "mutate-deps", "mutate-cfg")]
+    checks = list(checks) + (list(SERVICE_CHECKS) if args.services else [])
     print(BOLD("tm_im 全量自检"))
     print(DIM(f"  仓库: {REPO}"))
+    if not args.services:
+        # 明确说出「哪些没验证」，而不是让读者以为绿色代表全都验过了
+        print(DIM(f"  跳过 {len(SERVICE_CHECKS)} 项需要外部服务的检查"
+                  f"（--services 启用：{'、'.join(c[0] for c in SERVICE_CHECKS)}）"))
     print()
 
     results = []

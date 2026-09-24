@@ -64,12 +64,40 @@ tm:
     # 心跳：读空闲 30s 发 ping；60s 未响应告警；90s 断开
     heartbeat-idle-seconds: 30
     heartbeat-timeout-seconds: 90
+    # 握手超时：连上之后多久没完成 AUTH 就断开（04-realtime.md §5.2）
+    # 它覆盖两个阶段并且**共享同一个预算**：一个字节都没发 → 直接关
+    # （此时承载方式未知，服务端无法保证对方能读懂任何字节）；
+    # 已分流但没发 AUTH → 先回 40101 再关。
+    auth-timeout-ms: 5000
+    # 单帧字节上限。必须 < 16MB：同端口分流靠「长度前缀首字节为 0x00」这个判据，
+    # 长度达到 16MB 后首字节就不再是 0x00，判据失效 —— 启动时会校验，越界直接起不来。
+    max-frame-bytes: 1048576
     # 写缓冲水位（背压控制，超过高水位则丢弃非关键帧）
     write-buffer-high-water-mark: 65536
     write-buffer-low-water-mark: 32768
     # 单连接每秒最大帧数（防刷）
     max-frames-per-second: 200
     max-connections: 200000
+    # 优雅停机：停止接受新连接后，等待写缓冲刷出的上限
+    graceful-shutdown-millis: 5000
+
+  # ---------- 身份与令牌 ----------
+  identity:
+    # JWT 签名密钥（HS256，至少 32 字节）。**必须由部署方提供**，
+    # 代码里没有默认值：有默认值就等于仓库里躺着一把能用的钥匙。
+    # 轮换方式：新密钥上线后旧 token 一律验签失败（客户端会收到 40102/40103，
+    # 按「重新登录」处理即可），因此不需双密钥并行期。
+    jwt-secret: ${TM_JWT_SECRET}
+    # 访问令牌有效期。短有效期 + 鉴权时每次从库里读账号状态 = 封禁的最坏生效延迟
+    access-token-ttl: 2h
+
+  # ---------- 时区口径 ----------
+  time:
+    # 库里 DATETIME(3) 列映射为**不带时区**的 LocalDateTime，
+    # 转成协议里的 created_at_ms 必须知道它属于哪个时区。
+    # 本值必须与 sharding.yaml 里 jdbcUrl 的 serverTimezone 一致，
+    # 否则时间会整体偏移几小时（消息照常收发、排序也对，只有显示的时间是错的）。
+    zone: Asia/Shanghai
 
   # ---------- 媒体（图片）存储 ----------
   storage:
@@ -84,9 +112,13 @@ tm:
     secret-key: ${TM_OSS_SK:}
 
   # ---------- Snowflake 节点标识（多实例必须各不相同！） ----------
+  # 刻意**不**给默认值：`${TM_WORKER_ID:1}` 这种写法会让每个实例都拿到 1，
+  # 多实例部署时节点号相撞 → 生成的 ID 也相撞 → 主键冲突。
+  # 留空时服务端会退化为「按主机名哈希取节点号」并打 WARN，
+  # 单机开发可以省事，生产请显式注入（每实例不同）。
   snowflake:
-    worker-id: ${TM_WORKER_ID:1}
-    datacenter-id: ${TM_DC_ID:1}
+    worker-id: ${TM_WORKER_ID:}
+    datacenter-id: ${TM_DC_ID:}
 
   # ---------- 消息与扇出 ----------
   message:
