@@ -193,6 +193,77 @@ class ShardingSphereSpiAvailabilityTest {
                 .isEqualTo("InlineShardingAlgorithm");
     }
 
+    @Test
+    @DisplayName("模板 !SINGLE 规则必须真的能登记非分片表（空列表 = 一张都不要）")
+    void singleRuleInTemplateRegistersNonShardedTables() throws Exception {
+        Path template = findRepoRoot().resolve("deploy/conf/sharding.yaml.example");
+        String text = Files.readString(template, StandardCharsets.UTF_8);
+
+        List<String> block = blockAfter(text, "- !SINGLE");
+        assertThat(block)
+                .as("模板里找不到 !SINGLE 规则——conversation/actor 这类非分片表会全部不可见")
+                .isNotEmpty();
+
+        List<String> tables = new ArrayList<>();
+        boolean inTables = false;
+        for (String line : block) {
+            String s = line.trim();
+            if (s.startsWith("tables:")) {
+                inTables = true;
+                continue;
+            }
+            if (inTables && s.startsWith("-")) {
+                tables.add(s.substring(1).trim().replace("\"", ""));
+            } else if (inTables && !s.isEmpty() && !s.startsWith("#")) {
+                inTables = false;
+            }
+        }
+
+        // 5.5.3 的 SingleTableDataNodeLoader.load 第一条分支（已反编译核实）：
+        //   if (configuredTables.isEmpty() && featureRequiredSingleTables.isEmpty())
+        //       return Collections.emptyMap();
+        // 空列表既不是「全部」也不是「继承默认」，而是「一张都不要」：
+        // 症状是所有非分片表报 TableNotFoundException，而分片表 message 完全正常。
+        assertThat(tables)
+                .as("!SINGLE.tables 不能为空——空列表在 5.5.3 里等于「一张单表都不登记」，"
+                        + "非分片表会全部报 TableNotFoundException（模板：applyTableNode: %s）",
+                        template)
+                .isNotEmpty();
+
+        // 每项必须是数据节点（ds_0.表名 或 *.*）。裸表名会报
+        // InvalidDataNodeFormatException: Invalid format for actual data node 'xxx'（已实测）。
+        List<String> notDataNode = tables.stream().filter(t -> !t.contains(".")).toList();
+        assertThat(notDataNode)
+                .as("!SINGLE.tables 的每项必须是数据节点格式（ds_0.<表名> 或 *.*），"
+                        + "裸表名会报 InvalidDataNodeFormatException")
+                .isEmpty();
+
+        // 当前只启一个数据源，用通配最不容易漂移；换成显式列表时
+        // 必须覆盖 DDL 里全部非分片表，那一层由 tools/validate_yaml.py 盯。
+        assertThat(tables)
+                .as("单数据源形态下应使用 *.* 通配，避免新加业务表时漏配")
+                .contains("*.*");
+    }
+
+    /** 取以 {@code start} 开头的那一行起、直到下一行非缩进行为止的块。 */
+    private static List<String> blockAfter(final String text, final String start) {
+        List<String> out = new ArrayList<>();
+        boolean inside = false;
+        for (String line : text.split("\\R")) {
+            if (!inside) {
+                if (line.trim().startsWith(start)) {
+                    inside = true;
+                }
+                continue;
+            }
+            if (!line.isBlank() && !Character.isWhitespace(line.charAt(0))) {
+                break;   // 回到顶层（下一个规则或 props:）
+            }
+            out.add(line);
+        }
+        return out;
+    }
+
     /**
      * 反射调用 {@code TypedSPILoader.getService(Class, Object, Properties)}。
      *

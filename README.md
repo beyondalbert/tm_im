@@ -67,13 +67,13 @@ uv run --with protobuf --with pyyaml --with sqlglot python tools/verify_all.py
 | `schema` | 建表 SQL 语法 + **分片语义约束**（主键/幂等键必须含分片列） |
 | `server-sql` | 服务端核验脚本的语法与 information_schema 列引用 |
 | `docs` | 接入文档字节样本与签名向量 |
-| `shard` | 分片口径三方一致（DDL ↔ 模板 ↔ 代码）+ 配置可解析 |
+| `shard` | 分片口径三方一致（DDL ↔ 模板 ↔ 代码）+ 配置可解析 + **`!SINGLE` 单表规则必须非空** |
 | `errors` | 错误码契约：文档 §2 ↔ 枚举 |
 | `entities` | 实体类与建表 SQL 一致 |
 | `samples` | Webhook 签名测试向量 |
 | `config-tmpl` | 配置模板与 `@ConfigurationProperties` 一致（缺项 / 拼错 / 默认值不一致） |
 | `mutate` | **变异测试**：验证建表校验器真的能抓到错误 |
-| `mutate-deps` | **变异测试**：验证 ShardingSphere 依赖缺失必被守卫捕获 |
+| `mutate-deps` | **变异测试**：验证 ShardingSphere 依赖缺失与配置陷阱必被守卫捕获（8 类） |
 | `mutate-cfg` | **变异测试**：验证模板校验器能抓到 5 类缺陷 |
 
 `--quick` 跳过耗时的 `docs` / `mutate` / `mutate-deps` / `mutate-cfg`。
@@ -153,13 +153,27 @@ uv run --with pyyaml python tools/mutate_config_template.py    # 证明校验器
 # 单元测试：离线可跑，不需要数据库与凭据
 mvn -o test
 
-# 集成测试：需要真实 MySQL，用 -Pit 显式激活
+# 集成测试：需要真实 MySQL 与 Redis，用 -Pit 显式激活
 uv run python tools/gen_runtime_config.py
-mvn -pl tm-storage -am test -Pit "-Dtm.it.config=deploy/conf/runtime/sharding.yaml"
+mvn -pl tm-storage -am test -Pit \
+  "-Dtm.it.config=deploy/conf/runtime/sharding.yaml" \
+  "-Dtm.it.properties=deploy/conf/runtime/it.properties"
 ```
 
 集成测试**刻意做成"缺配置就失败"**，而不是"缺配置就跳过"：
 跳过会让"没验证"与"验证通过"呈现同一个绿色。
+
+`gen_runtime_config.py` 除 sharding.yaml / application.yml 外还生成一份
+`deploy/conf/runtime/it.properties`：扁平键值对的 MySQL + Redis 坐标。
+为什么不直接让 Java 去读 `application.yml`——那份文件里的 Redis 地址本来就写成
+`${TM_REDIS_HOST}` / `${TM_REDIS_PASSWORD}`（有意留给部署环境变量），
+在测试里解析它就等于把 Spring 的配置层重写一遍，写错了以"连不上"的形式暴露，看起来像服务故障。
+
+跑单个 IT 并看过滤后的输出（控制台是 GBK，直接管道 mvn 还会触发死管）：
+
+```bash
+uv run python tools/run_it.py ConversationSeqAllocationIT
+```
 
 ### 长连接（M2）：真连接端到端测试
 
@@ -198,6 +212,65 @@ mvn -o -pl tm-channel -am test
 uv run --with pymysql python tools/clean_it_leftovers.py          # 只统计
 uv run --with pymysql python tools/clean_it_leftovers.py --apply  # 真删
 ```
+
+### 消息序号（M3）：为什么先钉住它，而不是先写业务
+
+消息表的物理主键是 `(conv_id, seq)`，序号重复的后果不是"顺序乱"而是**那条消息插不进去**：
+客户端看到的是"发出去没反应"，而网络、鉴权、连接全部正常。
+所以 M3 写 `MessageService` 之前，先把序号这块地基用真实 MySQL + 真实 Redis 钉住：
+`server/tm-storage/src/test/java/.../repository/ConversationSeqAllocationIT.java`（5 个用例）。
+
+| 用例 | 钉住的事实 |
+|---|---|
+| 并发 8 线程 × 25 次取号 | Redis `INCR` 路径下每号唯一，且恰好用满 `1..200` |
+| 清空 `tm:seq:{convId}` | 清空后**确实**从 1 重新开始——这是缺陷的复现，也是`raiseSeqFloor` 存在的理由 |
+| `raiseSeqFloor(convId, 1)`（低于当前值） | 自愈只能抬、不能降；过期的基线不能把已发出的号拉回去 |
+| `nextSeqFromDb(convId, 42)` | 兜底路径从基线之上继续，而不是从 `seq_counter` 旧值发号 |
+| **无 Redis 时并发取号** | 数据库计数器靠行锁串行化（下面那条缺陷） |
+
+**这个测试抓到过一个真缺陷**：`nextSeq` 在 Redis 不可用时自调用同类的 `nextSeqFromDb`，
+而**自调用不走 Spring 代理**，`@Transactional` 形同虚设——`UPDATE` 与 `SELECT` 各自自动提交，
+行锁在两条语句之间就释放了。并发下多个线程读到同一个值：
+实测 200 次取号只有 **79 个不同值**（121 个重复）。
+
+修法是拆出 `ConversationSeqCounter` 这个独立 bean（事务在它上面生效），
+并把重试语义写清楚：`raiseSeqFloor` 只抬基线、**不白吃一个号**，
+自愈之后的下一次取号必须是 `max(当前值, floor) + 1`。
+
+这类缺陷单测抓不到（假 Redis/假 Mapper 验证的是假实现），
+而且只在 Redis 抖动时才走到——所以它必须由真实并发来钉。
+
+### 非分片表为什么可能全部"不存在"
+
+应用只有一个数据源，就是 ShardingSphere 那个。所以"分片表 `message` 能写"
+完全不代表"业务表 `conversation` 能读"——它们是两条不同的注册路径。
+
+实测（5.5.3 + MySQL 8.4）发现：`!SINGLE` 规则**只写 `defaultDataSource`、不写 `tables`** 时，
+所有非分片表一律不可访问：
+
+```
+TableNotFoundException: Table or view 'conversation' does not exist.
+```
+
+而 `message` 读写完全正常。这个组合极具误导性：错误全部指向业务表，
+看起来像建表脚本没跑、连错库、或实体注解写错。根因在
+`SingleTableDataNodeLoader.load` 的第一条分支（已反编译核实）：
+**空列表既不是"全部"也不是"继承默认"，而是"一张都不要"**。
+
+修法：`!SINGLE.tables: ["*.*"]`（未出现在分片规则里的表全部扫码登记）。
+`tables` 的每一项还必须是**数据节点**格式（`ds_0.表名` 或 `*.*`），
+裸表名会直接报 `InvalidDataNodeFormatException`。
+
+这一条现在被三层钉住：
+
+| 层 | 文件 | 盯什么 |
+|---|---|---|
+| 静态校验 | `tools/validate_yaml.py` | `tables` 非空、每项是数据节点、显式列表必须覆盖 DDL 里全部非分片表 |
+| 单元级模板检查 | `ShardingSphereSpiAvailabilityTest` | 模板里 `!SINGLE` 规则必须真的能登记表（在 `mvn test` 里跑） |
+| 真实服务 | `SingleTableRoutingIT` | 9 张非分片表逐个可查；`message` 可查；`message_0..15` **必须**被拒 |
+
+`tools/mutate_sharding_deps.py` 里新增了两类变异（去掉 `tables` 列表 / 换成裸表名），
+证明上面这些检查不是摆设，当前 **8/8 全部被捕获**。
 
 ### SPI 守卫：为什么会有这么一个测试
 

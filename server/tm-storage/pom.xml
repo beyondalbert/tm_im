@@ -68,6 +68,16 @@
       <artifactId>shardingsphere-infra-url-classpath</artifactId>
     </dependency>
 
+    <!-- ============================================================
+         Redis（DESIGN §10.3）：本模块是它的唯一使用方 —— 序号源。
+         放在 tm-storage 而不是 tm-core：这里是「基础设施适配层」，
+         把 Redis 放进业务模块会让业务代码随时能绕过仓储直接读写缓存。
+         ============================================================ -->
+    <dependency>
+      <groupId>org.springframework.boot</groupId>
+      <artifactId>spring-boot-starter-data-redis</artifactId>
+    </dependency>
+
     <!-- 版本由 Spring Boot BOM 管理 -->
     <dependency>
       <groupId>com.mysql</groupId>

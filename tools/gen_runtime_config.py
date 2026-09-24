@@ -1,6 +1,6 @@
 #!/usr/bin/env python
 # -*- coding: utf-8 -*-
-"""从 local-conn.env 生成运行时配置（sharding.yaml / application.yml）。
+"""从 local-conn.env 生成运行时配置（sharding.yaml / application.yml / it.properties）。
 
 为什么需要这一层
 --------------------------------------------------------------------------
@@ -13,6 +13,11 @@
 且生成时校验结果与模板的分片口径完全一致。
 
 输出目录 deploy/conf/runtime/ 已被 .gitignore 忽略。
+
+it.properties 是给集成测试用的**扁平键值对**：Java 侧要去解析 YAML 里的
+`${TM_REDIS_HOST:6379}` 这种占位符，等于把 Spring 的配置解析层重写一遍，
+而那份 application.yml 里的 Redis 地址本来就是有意留给环境变量的。
+所以直接多生成一份无歧义的坐标，测试只读键值对。
 
 用法
     uv run python tools/gen_runtime_config.py            # 生成
@@ -94,6 +99,38 @@ def render_app(cfg: dict[str, str], sharding_path: Path) -> str:
     return header + text
 
 
+def render_it_props(cfg: dict[str, str], sharding_path: Path) -> str:
+    """集成测试用的扁平坐标。
+
+    这里不写 YAML：测试里读键值对比读 YAML 少一层出错可能，
+    而且这份文件的存在本身就在提醒“IT 会碰真实服务，别指向生产库”。
+    """
+    tz = cfg.get("MYSQL_SERVER_TIMEZONE", "Asia/Shanghai").strip() or "Asia/Shanghai"
+    ssl = str(cfg.get("MYSQL_USE_SSL", "false")).lower() == "true"
+    lines = [
+        "# 本文件由 tools/gen_runtime_config.py 生成，含真实凭据，请勿提交",
+        "# 重新生成： uv run python tools/gen_runtime_config.py",
+        "# 用途： -Pit 集成测试的真实 MySQL / Redis 坐标",
+        "",
+        "mysql.host=" + cfg.get("MYSQL_HOST", "").strip(),
+        "mysql.port=" + (cfg.get("MYSQL_PORT", "3306").strip() or "3306"),
+        "mysql.user=" + cfg.get("MYSQL_USER", "").strip(),
+        "mysql.password=" + cfg.get("MYSQL_PASSWORD", ""),
+        "mysql.database=" + (cfg.get("MYSQL_DATABASE", "tm_im").strip() or "tm_im"),
+        "mysql.timezone=" + tz,
+        "mysql.ssl=" + str(ssl).lower(),
+        "",
+        "redis.host=" + (cfg.get("REDIS_HOST", "").strip() or cfg.get("MYSQL_HOST", "").strip()),
+        "redis.port=" + (cfg.get("REDIS_PORT", "6379").strip() or "6379"),
+        "redis.password=" + cfg.get("REDIS_PASSWORD", ""),
+        "redis.db=" + (cfg.get("REDIS_DB", "0").strip() or "0"),
+        "",
+        "sharding.yaml=" + sharding_path.as_posix(),
+        "",
+    ]
+    return "\n".join(lines)
+
+
 def main() -> int:
     ap = argparse.ArgumentParser(description="生成运行时配置（含真实凭据）")
     ap.add_argument("--env", help="配置文件路径（默认 deploy/conf/local-conn.env）")
@@ -104,6 +141,7 @@ def main() -> int:
 
     sharding_out = RUNTIME / "sharding.yaml"
     app_out = RUNTIME / "application.yml"
+    it_out = RUNTIME / "it.properties"
 
     for p in (SHARDING_TMPL, APP_TMPL):
         if not p.exists():
@@ -129,6 +167,7 @@ def main() -> int:
 
     sharding_text = render_sharding(cfg)
     app_text = render_app(cfg, sharding_out)
+    it_text = render_it_props(cfg, sharding_out)
 
     # 生成物必须真的把占位符换掉了，否则会带着字面 MYSQL_USER 去连库，
     # 表现为"认证失败"，而排查方向会被引到密码上。
@@ -147,7 +186,8 @@ def main() -> int:
 
     if args.check:
         ok = True
-        for out, want in ((sharding_out, sharding_text), (app_out, app_text)):
+        for out, want in ((sharding_out, sharding_text), (app_out, app_text),
+                          (it_out, it_text)):
             if not out.exists():
                 print("缺失: " + str(out.relative_to(REPO)))
                 ok = False
@@ -163,12 +203,16 @@ def main() -> int:
     # 而且 CRLF 会让 --check 的比对结果依赖平台。
     io.open(sharding_out, "w", encoding="utf-8", newline="").write(sharding_text)
     io.open(app_out, "w", encoding="utf-8", newline="").write(app_text)
+    io.open(it_out, "w", encoding="utf-8", newline="").write(it_text)
 
     print("已生成（含真实凭据，已被 .gitignore 忽略）:")
     print("  " + str(sharding_out.relative_to(REPO)))
     print("  " + str(app_out.relative_to(REPO)))
+    print("  " + str(it_out.relative_to(REPO)))
     print("  目标库: {}:{} / {}  用户: {}".format(
         host, cfg.get("MYSQL_PORT"), cfg.get("MYSQL_DATABASE"), cfg.get("MYSQL_USER")))
+    redis_host = cfg.get("REDIS_HOST", "").strip() or host
+    print("  目标 Redis: {}:{}".format(redis_host, cfg.get("REDIS_PORT", "6379")))
     print()
     print("供集成测试使用：")
     print("  mvn -pl tm-storage -am test -Pit \"-Dtm.it.config={}\"".format(

@@ -1,0 +1,118 @@
+package com.tm.im.storage.it;
+
+import com.baomidou.mybatisplus.spring.MybatisSqlSessionFactoryBean;
+import com.tm.im.storage.mapper.ConversationMapper;
+import com.tm.im.storage.mapper.ConversationMemberMapper;
+import com.tm.im.storage.repository.ConversationRepositoryImpl;
+import com.tm.im.storage.repository.ConversationSeqCounter;
+import com.zaxxer.hikari.HikariDataSource;
+import org.apache.ibatis.session.SqlSessionFactory;
+import org.mybatis.spring.annotation.MapperScan;
+import org.springframework.context.annotation.Bean;
+import org.springframework.context.annotation.Configuration;
+import org.springframework.data.redis.connection.RedisPassword;
+import org.springframework.data.redis.connection.RedisStandaloneConfiguration;
+import org.springframework.data.redis.connection.lettuce.LettuceConnectionFactory;
+import org.springframework.data.redis.core.StringRedisTemplate;
+import org.springframework.jdbc.datasource.DataSourceTransactionManager;
+import org.springframework.transaction.PlatformTransactionManager;
+import org.springframework.transaction.annotation.EnableTransactionManagement;
+
+/**
+ * 集成测试用的最小 Spring 容器：<b>真实 MySQL + 真实 Redis，但用生产的那几个类</b>。
+ *
+ * <p><b>为什么不直接 new 出仓储对象</b>：{@code @Transactional} 靠 Spring 代理生效。
+ * 手工 new 一个 {@code ConversationSeqCounter} 再调用它的方法，
+ * 拿到的是「没有事务的版本」——于是测试验证的是另一段代码，
+ * 而真正的缺陷（自调用绕过代理 → 行锁提前释放 → 并发取到同一个序号，
+ * 详见 {@link ConversationSeqCounter} 的类注释）恰好会被这层假象盖住。
+ * 所以容器可以很小，但事务代理必须是真的。
+ *
+ * <p><b>为什么数据源用 ShardingSphere 驱动而不是直连 MySQL</b>：
+ * 与生产同构（{@code application-external.yml.example} 就是这么配的）。
+ * 顺带保证「逻辑表名 message 由 ShardingSphere 路由」这条路径在集成测试里也被走过，
+ * 而不是测试用直连、生产走分片这一种最难发现的偏差。
+ */
+@Configuration
+@EnableTransactionManagement
+@MapperScan(basePackageClasses = ConversationMapper.class)
+public class ItSpringConfig {
+
+    /** 走分片驱动；连接池开小一点，测试不需要几十条连接。 */
+    @Bean
+    public HikariDataSource dataSource() {
+        HikariDataSource ds = new HikariDataSource();
+        ds.setPoolName("it-pool");
+        ds.setDriverClassName("org.apache.shardingsphere.driver.ShardingSphereDriver");
+        ds.setJdbcUrl(ItEnv.shardingJdbcUrl());
+        ds.setMaximumPoolSize(8);
+        // 拿不到连接时快点失败：挂 30 秒再报错会把「配置错」拖成「测试超时」
+        ds.setConnectionTimeout(10_000);
+        return ds;
+    }
+
+    @Bean
+    public SqlSessionFactory sqlSessionFactory(HikariDataSource dataSource) throws Exception {
+        MybatisSqlSessionFactoryBean factory = new MybatisSqlSessionFactoryBean();
+        factory.setDataSource(dataSource);
+        factory.setTypeAliasesPackage("com.tm.im.domain.entity");
+        // 必须用 MyBatis-Plus 的 factory bean：仓储实现里用的是
+        // Wrappers.lambdaQuery(...)，它依赖 MP 在注册 Mapper 时建立的
+        // 实体-列名缓存（TableInfoHelper）。换成原生 MyBatis 的 SqlSessionFactory，
+        // 会以 "can not find lambda cache for this entity" 的形式失败。
+        return factory.getObject();
+    }
+
+    @Bean
+    public PlatformTransactionManager transactionManager(HikariDataSource dataSource) {
+        return new DataSourceTransactionManager(dataSource);
+    }
+
+    @Bean
+    public LettuceConnectionFactory redisConnectionFactory() {
+        RedisStandaloneConfiguration cfg = new RedisStandaloneConfiguration(
+                ItEnv.get("redis.host"), ItEnv.getInt("redis.port"));
+        cfg.setDatabase(ItEnv.getInt("redis.db"));
+        String pwd = ItEnv.getOrEmpty("redis.password");
+        if (!pwd.isEmpty()) {
+            cfg.setPassword(RedisPassword.of(pwd));
+        }
+        return new LettuceConnectionFactory(cfg);
+    }
+
+    @Bean
+    public StringRedisTemplate stringRedisTemplate(LettuceConnectionFactory factory) {
+        StringRedisTemplate template = new StringRedisTemplate(factory);
+        template.afterPropertiesSet();
+        return template;
+    }
+
+    @Bean
+    public ConversationSeqCounter conversationSeqCounter(ConversationMapper mapper) {
+        return new ConversationSeqCounter(mapper);
+    }
+
+    /** 生产路径：序号走 Redis INCR。 */
+    @Bean
+    public ConversationRepositoryImpl conversationRepository(ConversationMapper conversationMapper,
+                                                            ConversationMemberMapper memberMapper,
+                                                            ConversationSeqCounter seqCounter,
+                                                            StringRedisTemplate redis) {
+        return new ConversationRepositoryImpl(conversationMapper, memberMapper, seqCounter, redis);
+    }
+
+    /**
+     * 兜底路径：Redis 不可用（构造参数为 null）。
+     *
+     * <p>这不是"测试专用开关"，而是生产里真会发生的一种状态——Redis 连接抖动时
+     * {@link ConversationRepositoryImpl#nextSeq} 会退到数据库计数器。
+     * 单独一个 bean 是为了能稳定地复现那条分支，而不是等它在某个深夜自己发生。
+     */
+    @Bean
+    public ConversationRepositoryImpl conversationRepositoryWithoutRedis(
+            ConversationMapper conversationMapper,
+            ConversationMemberMapper memberMapper,
+            ConversationSeqCounter seqCounter) {
+        return new ConversationRepositoryImpl(conversationMapper, memberMapper, seqCounter);
+    }
+}

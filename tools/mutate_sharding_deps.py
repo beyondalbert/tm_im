@@ -49,8 +49,7 @@ POM_ARTIFACT_BY_MUTATION = {
 }
 
 # (名字, 说明, 目标文件相对路径, 期望在失败输出里出现的关键词)
-MUTATIONS = [
-    (
+MUTATIONS = [    (
         "去掉 sharding-core",
         "分片功能整块消失：!SHARDING 无法识别、没有路由引擎、INLINE 算法不存在",
         "server/tm-storage/pom.xml",
@@ -86,7 +85,45 @@ MUTATIONS = [
         "deploy/conf/sharding.yaml.example",
         ["取模数"],
     ),
+    (
+        "单表规则去掉 tables 列表",
+        "只写 defaultDataSource 时，5.5.3 不会登记任何非分片表："
+        "conversation/actor 全部报 TableNotFoundException，而分片表 message 完全正常——"
+        "排查方向会被引向建表脚本或实体注解",
+        "deploy/conf/sharding.yaml.example",
+        ["!SINGLE.tables", "TableNotFoundException"],
+    ),
+    (
+        "单表规则用裸表名",
+        "tables 里的项必须是数据节点（ds_0.表名 或 *.*）；裸表名会让整个数据源初始化失败",
+        "deploy/conf/sharding.yaml.example",
+        ["数据节点", "InvalidDataNodeFormatException"],
+    ),
 ]
+
+# 模板类变异：名字 -> 把原文变成变异文本的函数。
+# 这里不用字符串直替，而是显式写出期望的原形状：模板一改就报"变异定义已过期"，
+# 而不是静默地变异到另一处、让“已捕获”变成假结论。
+TEMPLATE_MUTATORS = {
+    "模板里取模数与表数不一致": lambda text: (
+        text.replace("% 16", "% 8", 1)
+        if "% 16" in text else _stale("模板里找不到 '% 16'")),
+    "单表规则去掉 tables 列表": lambda text: _replace_once(
+        text,
+        "  - !SINGLE\n    tables:\n      - \"*.*\"\n    defaultDataSource: ds_0",
+        "  - !SINGLE\n    defaultDataSource: ds_0"),
+    "单表规则用裸表名": lambda text: _replace_once(text, "      - \"*.*\"", "      - actor"),
+}
+
+
+def _stale(msg: str) -> str:
+    raise AssertionError(msg)
+
+
+def _replace_once(text: str, old: str, new: str) -> str:
+    if old not in text:
+        raise AssertionError("变异定义已过期：模板里找不到\n" + old)
+    return text.replace(old, new, 1)
 
 # 仓库里这几个文件必须自始至终不变（脚本只读它们）
 READONLY_IN_REPO = [
@@ -171,18 +208,23 @@ def main() -> int:
         print("  ✅ 通过\n")
 
         failures: list[str] = []
+        # 每个变异都从「原始文件」重新开始，而不是在上一个变异的基础上继续。
+        # 否则多个变异落在同一个文件时，后一个的目标文本可能已被前一个删掉——
+        # 那时“变异未生效”会被当成“守卫没抓到”，结论完全反了。
+        pristine = {rel: (workspace / rel).read_text(encoding="utf-8")
+                    for _, _, rel, _ in MUTATIONS}
+
         for name, why, rel, keywords in MUTATIONS:
             target = workspace / rel
-            original = target.read_text(encoding="utf-8")
+            original = pristine[rel]
+            # newline="" 表示不做换行转换，保证写回与读入的字节风格一致
+            target.write_text(original, encoding="utf-8", newline="")
 
             if rel.endswith("pom.xml"):
                 mutated = drop_dependency(original, POM_ARTIFACT_BY_MUTATION[name])
             else:
-                if "% 16" not in original:
-                    raise AssertionError("模板里找不到 '% 16'，变异定义已过期")
-                mutated = original.replace("% 16", "% 8", 1)
+                mutated = TEMPLATE_MUTATORS[name](original)
 
-            # newline="" 表示不做换行转换，保证写回与读入的字节风格一致
             target.write_text(mutated, encoding="utf-8", newline="")
             code, out = run_guard(workspace)
 

@@ -533,16 +533,43 @@ rules:
         props:
           algorithm-expression: message_${conv_id % 16}
 
-  # 非分片表（actor/conversation/friendship/post/feed_item/media）
-  # 单数据源时可省略；多数据源时必须指定默认源
+  # 非分片表（actor/actor_secret/agent_profile/conversation/conversation_member
+  #              friendship/post/feed_item/media）——必须用 "*.*" 显式声明，理由见下方注
   - !SINGLE
+    tables:
+      - "*.*"
     defaultDataSource: ds_0
 
 props:
   sql-show: false   # dev 可设 true 观察路由
 ```
 
-> **注**：`!SINGLE` 规则与 `defaultDataSource` 已反编译核实存在（`YamlSingleRuleConfiguration`）。单数据源阶段可省略，**等到拆多库时必须补上**。
+> **注（已实测修正）**：`!SINGLE` 的 `tables` 列表**不能省、不能空**。空列表的后果不是
+> 「不启用单表规则」也不是「默认全部」，而是**所有非分片表一律查不到**：
+>
+> ```
+> TableNotFoundException: Table or view 'conversation' does not exist.
+> ```
+>
+> 而分片表 `message` 读写完全正常。这个组合极具误导性：报错全部指向业务表，
+> 看起来像建表脚本没跑、连错了库、或实体注解写错了。
+>
+> 原因在 `SingleTableDataNodeLoader.load` 的第一条分支（已反编译核实，5.5.3）：
+>
+> ```java
+> if (configuredTables.isEmpty() && featureRequiredSingleTables.isEmpty())
+>     return Collections.emptyMap();   // 空列表 = 一张都不要
+> ```
+>
+> 填 `"*.*"` 的语义是「未出现在分片规则里的表全部扫码自动登记」（代码里就是
+> `splitTables.contains("*.*") → load(databaseName, dataSourceMap, excludedTables)`），
+> 分片表的物理表名会被 `getExcludedTables` 排除，因此 `message_0` 依旧不可直接访问。
+>
+> 另外，`tables` 里的每项必须是**数据节点**格式（`ds_0.actor` 或 `*.*`）。
+> 只写表名会直接报 `InvalidDataNodeFormatException: Invalid format for actual data node 'actor'`。
+>
+> 这三条已机器校验：`tools/validate_yaml.py`（含「显式列表必须覆盖 DDL 里全部非分片表」）。
+> 真实可见性由 `SingleTableRoutingIT`（真实 MySQL）盯住。
 
 ### 8.4 分片数量与扩容路径
 

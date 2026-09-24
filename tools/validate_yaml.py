@@ -360,6 +360,51 @@ def main() -> int:
     check(ds.get("driver-class-name") == "org.apache.shardingsphere.driver.ShardingSphereDriver",
           "spring.datasource.driver-class-name 必须是 ShardingSphereDriver")
 
+    # ---------- 10. 单表规则必须真的能登记非分片表 ----------
+    # 这一节盯的是一个实测过的坑：`!SINGLE` 只写 defaultDataSource（tables 缺失或空）
+    # 时，所有非分片表**一律不可见**——
+    #   TableNotFoundException: Table or view 'conversation' does not exist.
+    # 而分片表 message 读写正常，于是报错全部指向业务表，看起来像建表脚本没跑。
+    # 5.5.3 的 SingleTableDataNodeLoader.load 第一条分支就是原因（已反编译核实）：
+    #   if (configuredTables.isEmpty() && featureRequiredSingleTables.isEmpty())
+    #       return Collections.emptyMap();
+    # 空列表既不是「全部」也不是「继承默认」，而是「一张都不要」。所以它必须是非空且机器可校的。
+    single_rule = next((r for r in rules if isinstance(r, dict) and "defaultDataSource" in r), None)
+    if not check(single_rule is not None,
+                 "sharding.yaml 缺少 !SINGLE 规则：非分片表（conversation/actor/...）会全部不可见"):
+        return report()
+
+    single_tables = single_rule.get("tables")
+    if not check(isinstance(single_tables, list) and len(single_tables) > 0,
+                 "!SINGLE.tables 为空/缺失：空列表在 5.5.3 里等于「一张单表都不登记」，"
+                 "非分片表会全部报 TableNotFoundException。写法： tables: [\"*.*\"]"):
+        return report()
+
+    check(all(isinstance(t, str) and "." in t for t in single_tables),
+          "!SINGLE.tables 的每一项都必须是数据节点（ds_0.表名 或 *.*），"
+          "只写裸表名会报 InvalidDataNodeFormatException。实际：{}".format(single_tables))
+
+    non_shard_tables = [t for t in all_tables if t not in shard_tables and t != logical]
+    wildcard = any(t in ("*.*", "*.*.*") for t in single_tables)
+    if not wildcard:
+        # 显式列表（拆多库时才会用到）必须覆盖 DDL 里全部非分片表：
+        # 漏一张的后果与上面那条空列表一模一样，但只在那张表上出现。
+        declared = {t.split(".")[-1].lower() for t in single_tables}
+        missing = [t for t in non_shard_tables if t.lower() not in declared]
+        check(not missing,
+              "!SINGLE.tables 没盖住这些 DDL 表：{}".format(missing))
+        leaked = [t for t in single_tables if t.split(".")[-1] in shard_tables]
+        check(not leaked,
+              "!SINGLE.tables 不能声明分片物理表（会与分片规则抢路由）：{}".format(leaked))
+    else:
+        check(logical not in single_tables,
+              "!SINGLE 用 *.* 通配即可，不要在同一条规则里再列具体表名")
+
+    # 通配写法下，非分片表靠扫码发现；这里只确认 DDL 确实有这些表，
+    # 避免“扫码发现”这个前提本身不成立（比如库名与 schema 对不上）。
+    check(len(non_shard_tables) > 0,
+          "DDL 里找不到非分片表，*.* 扫出来的将是一张单表都没有")
+
     return report()
 
 

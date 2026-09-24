@@ -48,11 +48,28 @@ rules:
           algorithm-expression: message_${conv_id % 16}
     # 本表主键由应用层 Snowflake 生成，故不配置 keyGenerators
 
-  # ---------------- 单表规则 ----------------
+  # ---------------- 单表规则（非分片表） ----------------
   # actor / actor_secret / agent_profile / conversation / conversation_member
-  # friendship / post / feed_item / media 均为非分片表
-  # 单数据源时可省略；拆多库后必须指定 defaultDataSource
+  # friendship / post / feed_item / media 均为非分片表。
+  #
+  # `"*.*"` 不是可有可无的：它声明「未出现在分片规则里的表全部自动扫码登记」。
+  # 省掉它（只写 defaultDataSource）的后果不是「没人管、照常能用」，而是
+  # **所有非分片表一律不可见**：
+  #
+  #   TableNotFoundException: Table or view 'conversation' does not exist.
+  #
+  # 而分片表 message 正常读写 —— 也就是说错误几乎全部指向业务表，
+  # 看起来像建表脚本没跑或连错了库。5.5.3 的 SingleTableDataNodeLoader.load
+  # 第一条分支就是这个（已反编译核实）：
+  #
+  #   if (configuredTables.isEmpty() && featureRequiredSingleTables.isEmpty())
+  #       return Collections.emptyMap();
+  #
+  # 空列表既不是「全部」也不是「继承默认」，而是「一张都不要」。
+  # 同样地，也不能写成 tables: (空) —— 那是同一个坑的另一种写法。
   - !SINGLE
+    tables:
+      - "*.*"
     defaultDataSource: ds_0
 
 props:
