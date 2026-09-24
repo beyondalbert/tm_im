@@ -282,25 +282,31 @@ def _normalize_charset(text: str, expected: int) -> str:
     return text.replace(old, new)
 
 
-def build(shards: int, prefix: str) -> str:
-    parts = [
-        HEADER_TMPL.format(
-            shards=shards,
-            prefix=prefix,
-            charset=CHARSET,
-            collation=COLLATION,
-            fingerprint="__FINGERPRINT__",  # 先占位，算完再回填
-        ),
-        actor_tables(),
-        conversation_tables(),
-        message_tables(shards),
-        social_tables(),
-        "-- ============================================================================\n"
-        f"-- 共 {shards} 张 message 分片表 + 9 张非分片表\n"
-        "-- ============================================================================\n",
-    ]
-    text = "\n".join(parts)
-    text = _normalize_charset(text, text.count("CREATE TABLE IF NOT EXISTS"))
+def build(shards: int, prefix: str, collation: str = COLLATION) -> str:
+    global COLLATION
+    orig = COLLATION
+    COLLATION = collation
+    try:
+        parts = [
+            HEADER_TMPL.format(
+                shards=shards,
+                prefix=prefix,
+                charset=CHARSET,
+                collation=collation,
+                fingerprint="__FINGERPRINT__",  # 先占位，算完再回填
+            ),
+            actor_tables(),
+            conversation_tables(),
+            message_tables(shards),
+            social_tables(),
+            "-- ============================================================================\n"
+            f"-- 共 {shards} 张 message 分片表 + 9 张非分片表\n"
+            "-- ============================================================================\n",
+        ]
+        text = "\n".join(parts)
+        text = _normalize_charset(text, text.count("CREATE TABLE IF NOT EXISTS"))
+    finally:
+        COLLATION = orig
 
     # 指纹只覆盖表定义部分，避免自我引用
     payload = text.replace("__FINGERPRINT__", "FP")
@@ -312,6 +318,10 @@ def main() -> int:
     ap = argparse.ArgumentParser(description="生成 tm_im 建表 SQL")
     ap.add_argument("--shards", type=int, default=SHARDS_DEFAULT)
     ap.add_argument("--prefix", default=PREFIX, help="库名")
+    ap.add_argument("--collation", default=COLLATION,
+                    help="表排序规则。默认 utf8mb4_unicode_ci（5.7/8.0 均支持）。\n"
+                         "若库已存在且为 8.0 默认（utf8mb4_0900_ai_ci），"
+                         "可传该值以对齐，但会失去 5.7 兼容性")
     ap.add_argument("--check", action="store_true",
                     help="校验已生成文件是否与当前定义一致（CI 用；不写盘）")
     args = ap.parse_args()
@@ -320,7 +330,13 @@ def main() -> int:
         print(f"错误：--shards 必须是 2 的幂（取模路由要求），当前 {args.shards}")
         return 2
 
-    text = build(args.shards, args.prefix)
+    # 排序规则合法性：8.0 专有排序规则会让 5.7 建表直接报 Unknown collation
+    if args.collation.endswith("0900_ai_ci") or "_0900_" in args.collation:
+        print(f"警告：{args.collation} 是 MySQL 8.0 专有排序规则，")
+        print("      在 5.7 服务端上执行本脚本会报 ERROR 1273 Unknown collation。")
+        print("      仅当你确认服务端为 8.0 且库已用该排序规则时才使用。")
+
+    text = build(args.shards, args.prefix, args.collation)
 
     if args.check:
         if not OUT.exists():

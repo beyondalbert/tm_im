@@ -25,6 +25,7 @@ TOOLS = REPO / "tools"
 # 每项：(名称, 脚本, 说明, 是否需要额外包)
 CHECKS = [
     ("schema",   "verify_schema.py",            "建表 SQL 语法 + 分片语义约束", "sqlglot"),
+    ("server-sql","verify_server_sql.py",       "服务端核验脚本语法与列引用",   "sqlglot"),
     ("docs",     "verify_integration_docs.py",  "接入文档字节级样本与签名向量", "protobuf"),
     ("yaml",     "validate_yaml.py",            "配置模板可解析",               "pyyaml"),
     ("samples",  "verify_doc_samples.py",       "Webhook 签名测试向量",         ""),
@@ -70,7 +71,6 @@ def main() -> int:
     checks = CHECKS
     if args.quick:
         checks = [c for c in checks if c[0] not in ("docs", "mutate")]
-
     print(BOLD("tm_im 全量自检"))
     print(DIM(f"  仓库: {REPO}"))
     print()

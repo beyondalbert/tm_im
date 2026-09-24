@@ -65,6 +65,7 @@ uv run --with protobuf --with pyyaml --with sqlglot python tools/verify_all.py
 | 检查项 | 内容 |
 |---|---|
 | `schema` | 建表 SQL 语法 + **分片语义约束**（主键/幂等键必须含分片列） |
+| `server-sql` | 服务端核验脚本的语法与 information_schema 列引用 |
 | `docs` | 接入文档字节样本与签名向量 |
 | `yaml` | 配置模板可解析 |
 | `samples` | Webhook 签名测试向量 |
@@ -123,6 +124,38 @@ yaml_shard_count_mismatch    已捕获   分片数不一致：yaml=8 DDL=16
 `Illegal mix of collations`，迁移时出现难以定位的排序差异。
 所以 25 张表统一显式声明 `COLLATE=utf8mb4_unicode_ci`——它在 5.7 与 8.0 上都存在，
 而 `utf8mb4_0900_*` 是 8.0 专有，在 5.7 上执行会直接报 `Unknown collation`。
+
+若库已存在且用 8.0 默认排序规则建库，可对齐（代价是失去 5.7 兼容性）：
+
+```bash
+python tools/gen_schema.py --collation utf8mb4_0900_ai_ci   # 会打印兼容性警告
+```
+
+### 服务端真实版本怎么确认
+
+**`mysql --version` 输出的是客户端版本，与所连服务端无关。**
+客户端 8.0 连 5.7 服务端是完全正常的组合，这是版本误判的头号原因。
+
+判断服务端版本必须用 `SELECT VERSION()`。`tools/verify_server.sql` 在服务端侧
+一次性给出全部事实（版本、排序规则、账号、权限、监听地址、InnoDB）：
+
+```bash
+mysql -h 127.0.0.1 -u root -p < tools/verify_server.sql
+```
+
+从**外部**也能判断，且不需要登录——`tools/diag_conn.py` 会解析服务端握手包，
+三条互相独立的证据：
+
+| 证据 | MySQL 5.7 | MySQL 8.0 |
+|---|---|---|
+| 握手包版本字符串 | `5.7.x` | `8.0.x` |
+| 握手包 collation id | `45` = `utf8mb4_general_ci` | `255` = `utf8mb4_0900_ai_ci` |
+| 8.0 专有 capability 位 | 均未设置 | 设置 |
+
+> 不要用 `CLIENT_DEPRECATE_EOF`（`0x01000000`）判别——该位从 **MySQL 5.7.5** 起
+> 就会设置，5.7.44 设置它是正常的，不是 8.0 特征。
+> 真正只属 8.0 的位：`QUERY_ATTRIBUTES`（8.0.23+）、`OPTIONAL_RESULTSET_METADATA`、
+> `ZSTD_COMPRESSION_ALGORITHM`（8.0.18+）。
 
 ## 配置
 
