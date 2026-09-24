@@ -34,5 +34,15 @@
       <artifactId>spring-boot-starter-test</artifactId>
       <scope>test</scope>
     </dependency>
+    <!-- 集成测试设施（ItEnv / ItSpringConfig）复用 tm-storage 的测试代码。
+         为什么不拷一份：两个副本必然漂移，而“测试用的数据源接法与生产不一致”
+         是最难发现的偏差——测试全绿而生产连不上。 -->
+    <dependency>
+      <groupId>com.tm.im</groupId>
+      <artifactId>tm-storage</artifactId>
+      <version>${project.version}</version>
+      <type>test-jar</type>
+      <scope>test</scope>
+    </dependency>
   </dependencies>
 </project>

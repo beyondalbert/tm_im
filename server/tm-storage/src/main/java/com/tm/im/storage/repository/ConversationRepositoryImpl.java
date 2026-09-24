@@ -26,8 +26,15 @@ public class ConversationRepositoryImpl implements ConversationRepository {
 
     private static final Logger log = LoggerFactory.getLogger(ConversationRepositoryImpl.class);
 
-    /** 与 DESIGN §10.3 的 key 设计一致：{@code tm:seq:{convId}}。 */
-    static final String SEQ_KEY_PREFIX = "tm:seq:";
+    /**
+     * 会话序号键前缀，与 DESIGN §10.3 的 key 设计一致：{@code tm:seq:{convId}}。
+     *
+     * <p>刻意 {@code public}：这是跨模块可见的<b>契约</b>（运维清缓存、
+     * 其他节点的自愈脚本、集成测试都要按同一个键名操作）。
+     * 若它是包内私有的，各处的本地副本会漂移，而漂移的表现是
+     * 「自愈自称成功但序号仍然撞」——排查时会先怀疑逻辑，很难怀疑到一个字符串。
+     */
+    public static final String SEQ_KEY_PREFIX = "tm:seq:";
 
     /**
      * 「不值则抬」—— <b>一条 Lua 保证原子</b>，且<b>不消耗号</b>。

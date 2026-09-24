@@ -70,8 +70,10 @@
 
     <!-- ============================================================
          Redis（DESIGN §10.3）：本模块是它的唯一使用方 —— 序号源。
-         放在 tm-storage 而不是 tm-core：这里是「基础设施适配层」，
-         把 Redis 放进业务模块会让业务代码随时能绕过仓储直接读写缓存。
+         声明在这里而不是 tm-core，是因为它是**基础设施适配层**的实现依赖：
+         仓储实现用它，业务服务不应该知道自己底下是 Redis。
+         （注意：tm-core 依赖 tm-storage，所以 Redis 的类对 tm-core 依然可见；
+           这条声明的意义是「谁用就谁声明」，避免出现无人使用的依赖声明。）
          ============================================================ -->
     <dependency>
       <groupId>org.springframework.boot</groupId>
@@ -91,4 +93,31 @@
       <scope>test</scope>
     </dependency>
   </dependencies>
+
+  <build>
+    <plugins>
+      <!-- 把 src/test 里的集成测试设施（ItEnv / ItSpringConfig）打成 test-jar，
+           供 tm-core 的集成测试复用：消息写入的验证需要真实的
+           ShardingSphere 数据源 + 真实 Redis，而那套接法只应该有一份。 -->
+      <plugin>
+        <groupId>org.apache.maven.plugins</groupId>
+        <artifactId>maven-jar-plugin</artifactId>
+        <executions>
+          <execution>
+            <id>test-jar</id>
+            <!-- 常规写法是绑在 package，但本项目的集成测试入口是
+                 `mvn ... test -Pit`（不跑 package）。绑在 package 的话，
+                 反应堆里的 tm-core 会在解析 test-jar 依赖时失败：
+                   Could not resolve dependencies ... tm-storage:jar:tests
+                 而报错完全不会指向“阶段不对”。绑到 test 编译刚结束那一刻，
+                 两种命令（test / package）都能跑。 -->
+            <phase>process-test-classes</phase>
+            <goals>
+              <goal>test-jar</goal>
+            </goals>
+          </execution>
+        </executions>
+      </plugin>
+    </plugins>
+  </build>
 </project>

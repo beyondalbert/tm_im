@@ -4,6 +4,7 @@ import com.tm.im.channel.config.ChannelConfiguration;
 import com.tm.im.channel.config.NettyProperties;
 import com.tm.im.channel.registry.LocalConnectionRegistry;
 import com.tm.im.channel.support.InMemoryIdentity;
+import com.tm.im.channel.support.InMemoryMessagePort;
 import io.netty.channel.ChannelHandler;
 import io.netty.channel.ChannelHandlerAdapter;
 import io.netty.channel.socket.SocketChannel;
@@ -51,7 +52,8 @@ class ChannelPipelineInitializerTest {
 
         InMemoryIdentity identity = new InMemoryIdentity("initializer-test-secret-at-least-32-bytes");
         initializer = new TestableInitializer(properties, identity.service(),
-                new LocalConnectionRegistry(), executor, new ConnectionLimiter(10));
+                new LocalConnectionRegistry(), executor, new ConnectionLimiter(10),
+                new InMemoryMessagePort(), java.time.ZoneId.of("Asia/Shanghai"));
     }
 
     @AfterAll
@@ -112,8 +114,11 @@ class ChannelPipelineInitializerTest {
                             com.tm.im.core.identity.IdentityService identityService,
                             com.tm.im.channel.session.ConnectionRegistry registry,
                             ThreadPoolExecutor businessExecutor,
-                            ConnectionLimiter limiter) {
-            super(properties, identityService, registry, businessExecutor, limiter);
+                            ConnectionLimiter limiter,
+                            com.tm.im.core.message.MessageCommandPort messages,
+                            java.time.ZoneId databaseZone) {
+            super(properties, identityService, registry, businessExecutor, limiter,
+                    messages, databaseZone);
         }
 
         void initFor(SocketChannel channel) {

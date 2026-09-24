@@ -6,6 +6,7 @@ import com.tm.im.channel.config.NettyProperties;
 import com.tm.im.channel.session.ConnectionRegistry;
 import com.tm.im.channel.session.TmConnection;
 import com.tm.im.core.identity.IdentityService;
+import com.tm.im.core.message.MessageCommandPort;
 import com.tm.im.proto.transport.KickReason;
 import io.netty.bootstrap.ServerBootstrap;
 import io.netty.channel.Channel;
@@ -22,6 +23,7 @@ import org.springframework.context.SmartLifecycle;
 import org.springframework.stereotype.Component;
 
 import java.net.InetSocketAddress;
+import java.time.ZoneId;
 import java.util.List;
 import java.util.concurrent.ThreadPoolExecutor;
 import java.util.concurrent.TimeUnit;
@@ -54,6 +56,8 @@ public class NettyServer implements SmartLifecycle {
     private final IdentityService identityService;
     private final ConnectionRegistry registry;
     private final ThreadPoolExecutor businessExecutor;
+    private final MessageCommandPort messages;
+    private final ZoneId databaseZone;
 
     private EventLoopGroup bossGroup;
     private EventLoopGroup workerGroup;
@@ -64,11 +68,15 @@ public class NettyServer implements SmartLifecycle {
     public NettyServer(NettyProperties properties,
                        IdentityService identityService,
                        ConnectionRegistry registry,
-                       ThreadPoolExecutor nettyBusinessExecutor) {
+                       ThreadPoolExecutor nettyBusinessExecutor,
+                       MessageCommandPort messages,
+                       ZoneId databaseZone) {
         this.properties = properties;
         this.identityService = identityService;
         this.registry = registry;
         this.businessExecutor = nettyBusinessExecutor;
+        this.messages = messages;
+        this.databaseZone = databaseZone;
     }
 
     @Override
@@ -81,7 +89,8 @@ public class NettyServer implements SmartLifecycle {
 
         connectionLimiter = new ConnectionLimiter(properties.getMaxConnections());
         ChannelPipelineInitializer initializer = new ChannelPipelineInitializer(
-                properties, identityService, registry, businessExecutor, connectionLimiter);
+                properties, identityService, registry, businessExecutor, connectionLimiter,
+                messages, databaseZone);
 
         ServerBootstrap bootstrap = new ServerBootstrap()
                 .group(bossGroup, workerGroup)

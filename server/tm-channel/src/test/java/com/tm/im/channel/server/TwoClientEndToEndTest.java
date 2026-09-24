@@ -4,6 +4,7 @@ import com.tm.im.channel.config.ChannelConfiguration;
 import com.tm.im.channel.config.NettyProperties;
 import com.tm.im.channel.registry.LocalConnectionRegistry;
 import com.tm.im.channel.support.InMemoryIdentity;
+import com.tm.im.channel.support.InMemoryMessagePort;
 import com.tm.im.channel.wire.RawClient;
 import com.tm.im.channel.wire.RawProto;
 import org.junit.jupiter.api.AfterAll;
@@ -51,6 +52,9 @@ class TwoClientEndToEndTest {
     private static final int CMD_PING = 3;
     private static final int CMD_PONG = 4;
     private static final int CMD_SEND = 10;
+    private static final int CMD_SEND_ACK = 11;
+    private static final int CMD_READ = 13;
+    private static final int CMD_SYNC = 14;
     private static final int CMD_KICK = 20;
     private static final int CMD_ERROR = 21;
 
@@ -64,6 +68,13 @@ class TwoClientEndToEndTest {
     private static final int AR_HANDLE = 2;
     private static final int AR_ACTOR_TYPE = 3;
     private static final int AR_HEARTBEAT_SEC = 4;
+
+    /** SendAck（transport.proto:117-123）。 */
+    private static final int SA_CONV_ID = 1;
+    private static final int SA_SEQ = 2;
+    private static final int SA_MESSAGE_ID = 3;
+    private static final int SA_CREATED_AT_MS = 4;
+    private static final int SA_CLIENT_MSG_ID = 5;
 
     /** KickNotice（transport.proto:162-166）。 */
     private static final int KN_REASON = 1;
@@ -82,6 +93,7 @@ class TwoClientEndToEndTest {
     private static final int ERR_INVALID_TOKEN_FORMAT = 40102;
     private static final int ERR_INVALID_API_KEY = 40105;
     private static final int ERR_BAD_REQUEST = 40000;
+    private static final int ERR_NOT_FRIENDS = 40003;
     private static final int ERR_INTERNAL_ERROR = 50000;
 
     private static final String HOST = "127.0.0.1";
@@ -104,6 +116,7 @@ class TwoClientEndToEndTest {
     private static InMemoryIdentity identity;
     private static LocalConnectionRegistry registry;
     private static ThreadPoolExecutor businessExecutor;
+    private static InMemoryMessagePort messages;
     private static NettyServer server;
     private static int port;
 
@@ -124,8 +137,10 @@ class TwoClientEndToEndTest {
 
         registry = new LocalConnectionRegistry();
         businessExecutor = new ChannelConfiguration().nettyBusinessExecutor(properties);
+        messages = new InMemoryMessagePort();
 
-        server = new NettyServer(properties, identity.service(), registry, businessExecutor);
+        server = new NettyServer(properties, identity.service(), registry, businessExecutor,
+                messages, java.time.ZoneId.of("Asia/Shanghai"));
         server.start();
         port = server.port();
         assertThat(port).as("服务端必须真的绑定了一个端口").isPositive();
@@ -318,7 +333,7 @@ class TwoClientEndToEndTest {
     }
 
     @Test
-    @DisplayName("已就绪连接：重复 AUTH 回 40000，M3 之前的业务命令回 50000 而不是静默")
+    @DisplayName("已就绪连接：重复 AUTH 回 40000；未接上的命令回 50000 而不是静默")
     void readyConnectionAnswersProtocolMistakes() throws Exception {
         try (RawClient alice = webSocket()) {
             authenticate(alice, 1, identity.jwt(ALICE), "web-1");
@@ -328,29 +343,129 @@ class TwoClientEndToEndTest {
             Map<Integer, Object> duplicate = errorFrame(alice.expectFrame("重复 AUTH"));
             assertThat(RawProto.number(duplicate, ER_CODE)).isEqualTo(ERR_BAD_REQUEST);
 
-            // CMD_SEND：M2 尚未实现，但绝不能静默 —— 静默会让客户端一直等 ACK，
+            // CMD_SYNC：尚未实现（协议上 CMD_SYNC 同时被用作请求与响应，
+            // 需要一个独立的响应命令字才能无歧义地实现，见 BusinessHandler 注释）。
+            // 但绝不能静默 —— 静默会让客户端一直等响应，
             // 现象是「消息发出去没反应」，看起来像丢包。
-            byte[] sendRequest = RawProto.concat(
-                    RawProto.varintField(1, 1001),                       // conv_id
-                    RawProto.stringField(2, "c-7f3a9b21"),               // client_msg_id
-                    RawProto.varintField(3, 1),                          // msg_type = TEXT
-                    RawProto.stringField(4, "{\"text\":\"hi\"}"));       // content_json
-            alice.send(CMD_SEND, 3, sendRequest);
+            alice.send(CMD_SYNC, 3, null);
 
-            Map<Integer, Object> sendFrame = alice.expectFrame("CMD_SEND");
+            Map<Integer, Object> syncFrame = alice.expectFrame("CMD_SYNC");
             // 注意：req_id 在 Frame 里（字段 2），不在 ErrorFrame 里。
             // 把两者混起来读会拿到 ErrorFrame 的 message 字段（长度分隔），
             // 严格解析器会当场报「字段 2 不是 varint」。
-            assertThat(RawProto.number(sendFrame, F_CMD)).isEqualTo(CMD_ERROR);
-            assertThat(RawProto.number(sendFrame, F_REQ_ID)).isEqualTo(3);
+            assertThat(RawProto.number(syncFrame, F_CMD)).isEqualTo(CMD_ERROR);
+            assertThat(RawProto.number(syncFrame, F_REQ_ID)).isEqualTo(3);
 
-            Map<Integer, Object> notImplemented = errorFrame(sendFrame);
+            Map<Integer, Object> notImplemented = errorFrame(syncFrame);
             assertThat(RawProto.number(notImplemented, ER_CODE)).isEqualTo(ERR_INTERNAL_ERROR);
-            assertThat(RawProto.text(notImplemented, ER_MESSAGE)).contains("CMD_SEND");
+            assertThat(RawProto.text(notImplemented, ER_MESSAGE)).contains("CMD_SYNC");
             assertThat(RawProto.flag(notImplemented, ER_RETRYABLE)).isTrue();
 
             // 连接必须还活着：一条未实现的命令不该让客户端掉线
             assertPingPong(alice, 4);
+        }
+    }
+
+    @Test
+    @DisplayName("M3：CMD_SEND 的载荷被原样翻译成调用，并回携带权威 seq 的 SEND_ACK")
+    void sendCommandIsTranslatedAndAcked() throws Exception {
+        try (RawClient alice = webSocket()) {
+            authenticate(alice, 1, identity.jwt(ALICE), "web-1");
+
+            byte[] sendRequest = RawProto.concat(
+                    RawProto.varintField(1, 1001),                       // conv_id
+                    RawProto.stringField(2, "c-7f3a9b21"),               // client_msg_id
+                    RawProto.varintField(3, 1),                          // msg_type = TEXT
+                    RawProto.stringField(4, "{\"text\":\"你好\"}"),   // content_json
+                    RawProto.varintField(5, 0));                         // reply_to
+            alice.send(CMD_SEND, 5, sendRequest);
+
+            Map<Integer, Object> frame = alice.expectFrame("CMD_SEND_ACK");
+            assertThat(RawProto.number(frame, F_CMD)).as("成功路径回的是 SEND_ACK，不是 ERROR")
+                    .isEqualTo(CMD_SEND_ACK);
+            assertThat(RawProto.number(frame, F_REQ_ID)).as("req_id 必须原样回传")
+                    .isEqualTo(5);
+
+            Map<Integer, Object> ack = RawProto.parse(RawProto.bytes(frame, F_PAYLOAD));
+            assertThat(RawProto.number(ack, SA_CONV_ID)).isEqualTo(1001);
+            assertThat(RawProto.number(ack, SA_SEQ)).as("seq 是服务端分配的权威序号").isEqualTo(1);
+            assertThat(RawProto.number(ack, SA_MESSAGE_ID)).isPositive();
+            assertThat(RawProto.text(ack, SA_CLIENT_MSG_ID)).isEqualTo("c-7f3a9b21");
+            assertThat(RawProto.number(ack, SA_CREATED_AT_MS))
+                    .as("created_at_ms 必须非 0——为 0 通常意味着忘了用 tm.time.zone 换算")
+                    .isPositive();
+
+            // 发送者是连接上鉴权得到的 actorId，而不是载荷里的任何东西：
+            // 载荷里根本没有 sender 字段，但若将来有人加上并采信它，这条断言会失败。
+            assertThat(messages.sent).hasSize(1);
+            assertThat(messages.sent.get(0).senderId())
+                    .as("发送者必须来自已鉴权的会话")
+                    .isEqualTo(ALICE);
+            assertThat(messages.sent.get(0).convId()).isEqualTo(1001);
+            assertThat(messages.sent.get(0).clientMsgId()).isEqualTo("c-7f3a9b21");
+            assertThat(messages.sent.get(0).contentJson()).contains("你好");
+
+            messages.reset();
+        }
+    }
+
+    @Test
+    @DisplayName("M3：业务异常按错误码回帧（40003 不能被包装成 50000）")
+    void businessErrorKeepsItsErrorCode() throws Exception {
+        try (RawClient alice = webSocket()) {
+            authenticate(alice, 1, identity.jwt(ALICE), "web-1");
+
+            messages.failNextSendWith(com.tm.im.common.error.ErrorCode.NOT_FRIENDS);
+            alice.send(CMD_SEND, 9, RawProto.concat(
+                    RawProto.varintField(1, 1001),
+                    RawProto.stringField(2, "c-nonfriend"),
+                    RawProto.varintField(3, 1),
+                    RawProto.stringField(4, "{\"text\":\"hi\"}")));
+
+            Map<Integer, Object> frame = alice.expectFrame("CMD_SEND 的错误帧");
+            assertThat(RawProto.number(frame, F_CMD)).isEqualTo(CMD_ERROR);
+            assertThat(RawProto.number(frame, F_REQ_ID)).isEqualTo(9);
+            Map<Integer, Object> error = errorFrame(frame);
+            assertThat(RawProto.number(error, ER_CODE))
+                    .as("业务错误码必须原样传给客户端：包装成 50000 会让客户端去重试一个永远不会成功的请求")
+                    .isEqualTo(ERR_NOT_FRIENDS);
+            assertThat(RawProto.flag(error, ER_RETRYABLE)).isFalse();
+
+            // 连接还活着
+            assertPingPong(alice, 10);
+        }
+    }
+
+    @Test
+    @DisplayName("M3：CMD_READ 送到业务层（成功时不回帧，失败必须回 ERROR）")
+    void readCommandReachesService() throws Exception {
+        try (RawClient alice = webSocket()) {
+            authenticate(alice, 1, identity.jwt(ALICE), "web-1");
+
+            messages.reads.clear();
+            alice.send(CMD_READ, 11, RawProto.concat(
+                    RawProto.varintField(1, 1001),   // conv_id
+                    RawProto.varintField(2, 7)));    // last_read_seq
+
+            // 成功没有响应帧（协议里 CMD_READ 只有请求），所以用「后续 PING 的 PONG」
+            // 来确认服务端已把上一个命令处理完，而不是靠 sleep。
+            assertPingPong(alice, 12);
+            // 不能拿 PONG 当作「上一个命令已处理完」的证据：CMD_READ 走业务线程池，
+            // 而 PING/PONG 在 IO 线程上被心跳处理器直接应答 —— 两者没有先后关系。
+            // 这里等的是**副作用本身**（带超时的轮询），而不是 sleep 一拍再赌。
+            awaitCondition("已读上报应被业务层处理", () -> !messages.reads.isEmpty());
+            assertThat(messages.reads).as("已读上报必须带上已鉴权的 actorId，而不是载荷里的东西")
+                    .containsExactly("1001:" + ALICE + "=7");
+
+            // 失败路径：必须是错误帧，让客户端知道未读状态没有生效
+            messages.failNextReadWith(com.tm.im.common.error.ErrorCode.INVALID_CURSOR);
+            alice.send(CMD_READ, 13, RawProto.concat(
+                    RawProto.varintField(1, 1001),
+                    RawProto.varintField(2, 99999)));
+            Map<Integer, Object> frame = alice.expectFrame("CMD_READ 的错误帧");
+            assertThat(RawProto.number(frame, F_CMD)).isEqualTo(CMD_ERROR);
+            assertThat(RawProto.number(frame, F_REQ_ID)).isEqualTo(13);
+            assertThat(RawProto.number(errorFrame(frame), ER_CODE)).isEqualTo(40010);
         }
     }
 

@@ -3,6 +3,7 @@ package com.tm.im.core.config;
 import com.tm.im.common.id.IdGenerator;
 import com.tm.im.common.id.SnowflakeIdGenerator;
 import com.tm.im.core.identity.JwtTokenService;
+import com.tm.im.core.message.MessageProperties;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.boot.context.properties.EnableConfigurationProperties;
@@ -22,7 +23,8 @@ import java.time.ZoneId;
  * 这里把「读配置」集中在装配点，业务类只能通过构造参数拿到<b>已经建好的对象</b>。
  */
 @Configuration
-@EnableConfigurationProperties({SnowflakeProperties.class, IdentityProperties.class, TimeProperties.class})
+@EnableConfigurationProperties({SnowflakeProperties.class, IdentityProperties.class,
+        TimeProperties.class, MessageProperties.class})
 public class CoreConfiguration {
 
     private static final Logger log = LoggerFactory.getLogger(CoreConfiguration.class);

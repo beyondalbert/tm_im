@@ -9,6 +9,7 @@ import com.tm.im.channel.handler.FrameRateLimiter;
 import com.tm.im.channel.handler.HeartbeatHandler;
 import com.tm.im.channel.session.ConnectionRegistry;
 import com.tm.im.core.identity.IdentityService;
+import com.tm.im.core.message.MessageCommandPort;
 import com.tm.im.proto.transport.Frame;
 import io.netty.channel.ChannelInitializer;
 import io.netty.channel.ChannelPipeline;
@@ -23,6 +24,7 @@ import io.netty.handler.codec.protobuf.ProtobufDecoder;
 import io.netty.handler.codec.protobuf.ProtobufEncoder;
 import io.netty.handler.timeout.IdleStateHandler;
 
+import java.time.ZoneId;
 import java.util.concurrent.ThreadPoolExecutor;
 import java.util.concurrent.TimeUnit;
 
@@ -57,17 +59,30 @@ public class ChannelPipelineInitializer extends ChannelInitializer<SocketChannel
     private final ConnectionRegistry registry;
     private final ThreadPoolExecutor businessExecutor;
     private final ConnectionLimiter limiter;
+    private final MessageCommandPort messages;
+    private final ZoneId databaseZone;
 
+    /**
+     * @param messages     业务命令的调用面（{@code MessageService}）。
+     *                     用接口而不是具体类：本类的职责是装配 pipeline，
+     *                     不该被“消息服务需要七个依赖”这件事拖住——
+     *                     见 {@link MessageCommandPort} 的注释。
+     * @param databaseZone 回执里 {@code created_at_ms} 的换算时区（{@code tm.time.zone}）
+     */
     public ChannelPipelineInitializer(NettyProperties properties,
                                       IdentityService identityService,
                                       ConnectionRegistry registry,
                                       ThreadPoolExecutor businessExecutor,
-                                      ConnectionLimiter limiter) {
+                                      ConnectionLimiter limiter,
+                                      MessageCommandPort messages,
+                                      ZoneId databaseZone) {
         this.properties = properties;
         this.identityService = identityService;
         this.registry = registry;
         this.businessExecutor = businessExecutor;
         this.limiter = limiter;
+        this.messages = messages;
+        this.databaseZone = databaseZone;
     }
 
     @Override
@@ -144,6 +159,6 @@ public class ChannelPipelineInitializer extends ChannelInitializer<SocketChannel
                 identityService, registry, businessExecutor,
                 properties.getAuthTimeoutMs(), properties.getHeartbeatIdleSeconds()));
         pipeline.add("heartbeat", new HeartbeatHandler());
-        pipeline.add("business", new BusinessHandler());
+        pipeline.add("business", new BusinessHandler(messages, businessExecutor, databaseZone));
     }
 }

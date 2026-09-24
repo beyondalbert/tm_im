@@ -64,7 +64,7 @@ class ConversationSeqAllocationIT {
     private static final int PER_THREAD = 25;
 
     @Autowired
-    @Qualifier("conversationRepository")
+    @Qualifier("conversationRepositoryImpl")
     private ConversationRepository repository;
 
     @Autowired
