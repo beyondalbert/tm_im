@@ -71,10 +71,23 @@ uv run --with protobuf --with pyyaml --with sqlglot python tools/verify_all.py
 | `errors` | 错误码契约：文档 §2 ↔ 枚举 |
 | `entities` | 实体类与建表 SQL 一致 |
 | `samples` | Webhook 签名测试向量 |
+| `config-tmpl` | 配置模板与 `@ConfigurationProperties` 一致（缺项 / 拼错 / 默认值不一致） |
 | `mutate` | **变异测试**：验证建表校验器真的能抓到错误 |
 | `mutate-deps` | **变异测试**：验证 ShardingSphere 依赖缺失必被守卫捕获 |
+| `mutate-cfg` | **变异测试**：验证模板校验器能抓到 5 类缺陷 |
 
-`--quick` 跳过耗时的 `docs` / `mutate` / `mutate-deps`。
+`--quick` 跳过耗时的 `docs` / `mutate` / `mutate-deps` / `mutate-cfg`。
+
+另有 2 项需要外部 MySQL/Redis（`runtime-cfg` = 运行时配置是否与当前
+`local-conn.env` 一致，`collation` = 实测服务端排序规则等价性），用 `--services` 打开：
+
+```bash
+uv run --with protobuf --with pyyaml --with sqlglot --with pymysql \
+  python tools/verify_all.py --services
+```
+
+不加 `--services` 时脚本会明确打印「跳过了 2 项需要外部服务的检查」——
+而不是让读者以为绿色代表全都验过了。
 
 ### 建表 SQL 为什么是生成的
 
@@ -115,6 +128,25 @@ yaml_shard_count_mismatch    已捕获   分片数不一致：yaml=8 DDL=16
 若变异**未生效**（目标文本没找到），脚本会直接报错而不是静默跳过——
 否则一个写错了的变异会伪装成"校验器很厉害"。
 
+### 配置模板为什么也要机器校验
+
+`deploy/conf/application-external.yml.example` 是**运维视角的权威文档**：
+部署方照它写配置。但它与代码之间没有任何编译期约束，所以必然漂移，
+而漂移的方向总是最坏的一种——**模板缺项**。缺项不会报错：
+运维没配那一项，服务就用代码默认值，而「模板里没写」看起来完全等于
+「这一项不需要配」。M2 收尾时实测到 5 个缺项（包括整个 `tm.identity` 段）
+与 1 个危险默认值（`${TM_WORKER_ID:1}` 让每个实例拿到同一个 Snowflake 节点号，
+多实例部署即主键撞车，而单实例测试永远发现不了）。
+
+```bash
+uv run --with pyyaml python tools/verify_config_template.py    # 校验
+uv run --with pyyaml python tools/mutate_config_template.py    # 证明校验器不是摆设
+```
+
+它校三个方向：代码 → 模板（缺项）、模板 → 代码（拼写错误会被 Spring
+**静默忽略**）、以及默认值一致性（代码里没有默认值的项，模板必须用
+`${ENV}` 且不给默认值——否则仓库里就躺着一把能用的密钥）。
+
 ### 服务端测试：单元 / 集成两层
 
 ```bash
@@ -128,6 +160,37 @@ mvn -pl tm-storage -am test -Pit "-Dtm.it.config=deploy/conf/runtime/sharding.ya
 
 集成测试**刻意做成"缺配置就失败"**，而不是"缺配置就跳过"：
 跳过会让"没验证"与"验证通过"呈现同一个绿色。
+
+### 长连接（M2）：真连接端到端测试
+
+M2 的验收标准是「两个客户端 WS 连通并可互发 PING/PONG」。它由
+`server/tm-channel/src/test/java/.../server/TwoClientEndToEndTest.java` 覆盖，
+跑在默认的 `mvn -o test` 里（不需要数据库）：
+
+```bash
+mvn -o -pl tm-channel -am test
+```
+
+它起一个真实的 Netty 服务（端口 0 = 系统分配），用真实的 socket 客户端走完整链路：
+协议分流 → 编解码 → 限流 → 握手鉴权（过业务线程池）→ 连接注册表 → 心跳。
+
+两件事值得记住：
+
+1. **客户端是独立实现**（`wire/RawProto` + `wire/RawClient`）：手写 protobuf 字节、
+   手写 RFC 6455 帧与握手（连 `Sec-WebSocket-Accept` 都自己算），不复用服务端任何一行代码。
+   两端共用 protobuf-java 的话，「服务端理解错了字段」与「客户端按同样的错误构造」
+   会互相抵消，测试依然是绿的。同时它把校验器写得**不宽容**：遇到不认识的线类型、
+   字节流截断、字段类型与预期不符，一律报错而不是跳过。
+2. **它在第一次运行时就抓到了 3 个致命缺陷**，而 24 个 `EmbeddedChannel` 单测全绿：
+   `ConnectionLimiter` 未标 `@Sharable`（第二条连接起全部建不起来）、
+   `AuthHandler` 的握手超时任务从未启动（`channelActive` 早就发过了）、
+   以及「同一个 initializer 被多条连接共用」这条装配期不变式没有任何测试。
+   它们全部是**结构上单测覆盖不到**的，因此现在有了
+   `ChannelPipelineInitializerTest` 来钉住那条不变式。
+
+定时器类行为（握手超时、心跳）的确定性写法也在用例注释里写清楚了：
+`freezeTime()` 要在调度**之前**调，`advanceTimeBy()` 之后必须再调 `runScheduledPendingTasks()`
+（它只推时钟、不跑任务），否则测试会「成功地」证明不了任何事。
 
 测试残留数据可按标记清理（断言失败或进程被强杀时会用到）：
 
