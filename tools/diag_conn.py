@@ -17,15 +17,20 @@ tm_im M0 连接诊断：回答"为什么连不上"，而不仅是"能不能连�
                               Redis -ERR/WRONGPASS = 密码错
                               Redis -NOAUTH      = 需要密码却没给
 
-用法:
+   用法:
     uv run --with pymysql --with cryptography python tools/diag_conn.py
     uv run --with pymysql --with cryptography python tools/diag_conn.py --mysql-only
+
+   本机装有 aTrust / v2ray，出站流量被接管，TCP 探测可能失真。
+   此时加 --external 借 check-host.net 全球节点复核（本工具在检出端口级失败时
+   会自动触发，除非显式 --no-external）。
 """
 
 from __future__ import annotations
 
 import argparse
 import hashlib
+import json
 import os
 import re
 import socket
@@ -71,6 +76,7 @@ DIM = lambda s: _c("90", s)
 BOLD = lambda s: _c("1", s)
 
 FINDINGS: list[tuple[str, str, str]] = []   # (级别, 标题, 结论)
+TCP_FAILED_PORTS: list[int] = []            # TCP 层失败的端口，供外部视角复核
 
 
 def head(t):
@@ -356,6 +362,7 @@ def check_redis(cfg: dict[str, str]) -> None:
 
     if not conn_ok:
         info("")
+        TCP_FAILED_PORTS.append(port)
         if last_err == "timeout":
             bad("TCP 连接超时 —— 端口被防火墙过滤，或服务未对公网监听")
             info(f"  {ARROW} 同一主机的 3306 是通的，说明网络路径本身没问题")
@@ -471,6 +478,129 @@ def check_redis(cfg: dict[str, str]) -> None:
         finding("fail", "Redis", f"协议探测失败 {type(e).__name__}")
 
 
+# ------------------------------------------------------------------ 外部视角验证
+#
+# 为什么必须有这个：
+#   本机装着 Sangfor aTrust（零信任 SASE）与 v2ray，出站流量被大量接管。
+#   实测：连 RFC5737 保留段 192.0.2.1:1（公网必不可能路由）都能 "连上"，
+#   而且仅靠 TCP 探测无法区分"远端拒绝"与"本机拦截"。
+#
+#   对策：借 check-host.net 的全球节点，从**完全独立的网络视角**验证端口。
+#   这是绕开本机一切代理/安全客户端的唯一可靠办法。
+#
+#   实战价值：曾用它确认 6379 在全球 14 个节点全部被 RST，
+#   从而判定"远端确实没监听"，而非本机拦截。
+
+EXTERNAL_API = "https://check-host.net"
+
+
+def _ext_api(path: str, timeout: int = 60):
+    import urllib.request
+    import ssl as _ssl
+    req = urllib.request.Request(EXTERNAL_API + path, headers={
+        "Accept": "application/json", "User-Agent": "Mozilla/5.0"})
+    with urllib.request.urlopen(req, timeout=timeout,
+                                context=_ssl.create_default_context()) as r:
+        return json.loads(r.read().decode("utf-8", "replace"))
+
+
+def external_port_check(host: str, ports: list[int], max_nodes: int = 14) -> dict:
+    """从全球节点验证端口。返回 {port: (成功数, 总数, 明细)}。
+
+    优先用有公网 IPv4 的节点，避开会因本机网络而失真的判断。
+    """
+    out: dict[int, tuple[int, int, list]] = {}
+
+    for port in ports:
+        try:
+            d = _ext_api(f"/check-tcp?host={host}:{port}&max_nodes={max_nodes}")
+        except Exception as e:
+            info(f"  端口 {port}: 外部 API 不可用 ({type(e).__name__})")
+            out[port] = (-1, 0, [])
+            continue
+
+        rid = d.get("request_id")
+        nodes = d.get("nodes", {})
+        if not rid:
+            info(f"  端口 {port}: 提交失败 {str(d)[:60]}")
+            out[port] = (-1, 0, [])
+            continue
+
+        res = None
+        for _ in range(22):
+            time.sleep(3)
+            try:
+                cur = _ext_api(f"/check-result/{rid}")
+            except Exception:
+                continue
+            if cur and all(v is not None for v in cur.values()):
+                res = cur
+                break
+            res = cur
+
+        if not res:
+            info(f"  端口 {port}: 未取得结果（API 限流或超时）")
+            out[port] = (-1, 0, [])
+            continue
+
+        rows, ok = [], 0
+        for node, data in res.items():
+            entry = data[0] if isinstance(data, list) and data else None
+            if not isinstance(entry, dict):
+                continue
+            nv = nodes.get(node)
+            loc = f"{nv[1]}/{nv[2]}" if isinstance(nv, list) and len(nv) >= 3 \
+                else node.split(".")[0]
+            err = entry.get("error")
+            if err:
+                rows.append((loc, f"失败: {str(err)[:40]}", False))
+            else:
+                ok += 1
+                rows.append((loc, f"成功 {entry.get('time')}s", True))
+        out[port] = (ok, len(rows), rows)
+
+    return out
+
+
+def show_external(host: str, ports: list[int]) -> None:
+    head("外部视角验证（check-host.net，绕开本机 aTrust/v2ray）")
+    info("本机网络已被安全客户端接管，故从全球独立节点复核端口状态")
+    info(f"目标 {host}，端口 {ports}；耗时约 30-60 秒")
+    info("")
+
+    result = external_port_check(host, ports)
+    verds = {}
+    for port in ports:
+        okn, tot, rows = result.get(port, (-1, 0, []))
+        if tot == 0:
+            continue
+        print(f"  ── 端口 {port} ──")
+        for loc, verdict, good in sorted(rows):
+            mark = OK("OK ") if good else DIM("-- ")
+            print(f"   {mark}{loc:<26} {verdict}")
+        verds[port] = (okn, tot)
+        level = "ok" if okn > 0 else "fail"
+        print(f"   → 成功 {okn} / {tot} 个节点")
+        info("")
+
+    # 至少需要一个"成功"的对照端口才能下结论
+    succ = [p for p, (o, t) in verds.items() if o > 0]
+    allfail = [p for p, (o, t) in verds.items() if o == 0]
+
+    if allfail and succ:
+        for p in allfail:
+            bad(f"端口 {p}: 全球节点无一可连，而同主机 {sorted(succ)} 正常")
+            info(f"  {ARROW} 该端口在远端确实没有监听（不是本机网络问题）")
+            finding("fail", f"端口 {p}", "全球节点验证：远端无监听")
+    elif allfail and not succ:
+        warn("所有被测端口在全球均不可连 —— 无法区分是远端问题还是目标本身不可达")
+        finding("warn", "外部验证", "无成功对照端口，结论不可靠")
+    else:
+        for p, (o, t) in sorted(verds.items()):
+            if o > 0:
+                ok(f"端口 {p}: {o}/{t} 节点可连")
+
+
 # ------------------------------------------------------------------ 汇总
 
 def summary() -> int:
@@ -490,6 +620,10 @@ def main() -> int:
     ap.add_argument("--env", default=str(REPO / "deploy" / "conf" / "local-conn.env"))
     ap.add_argument("--mysql-only", action="store_true")
     ap.add_argument("--redis-only", action="store_true")
+    ap.add_argument("--external", action="store_true",
+                    help="强制用 check-host.net 全球节点复核端口")
+    ap.add_argument("--no-external", action="store_true",
+                    help="不做外部验证（默认在有端口失败时自动做）")
     args = ap.parse_args()
 
     cfg = load_env(Path(args.env))
@@ -500,12 +634,31 @@ def main() -> int:
     print(BOLD("tm_im M0 连接诊断"))
     print(DIM(f"  配置: {args.env}"))
 
-    if not args.redis_only:
+    run_mysql = not args.redis_only
+    run_redis = not args.mysql_only
+    host = cfg.get("REDIS_HOST", "").strip() or cfg.get("MYSQL_HOST", "").strip()
+
+    if run_mysql and run_redis:
         net_baseline()
-    if not args.redis_only:
+    if run_mysql:
         check_mysql(cfg)
-    if not args.mysql_only:
+    if run_redis:
         check_redis(cfg)
+
+    # 外部视角复核
+    #
+    # 只要有端口在 TCP 层失败，就必须引入外部视角——因为本机装有 aTrust/v2ray，
+    # 仅凭本机结果无法区分"远端拒绝"与"本机拦截"。
+    # 同时必须带上一个已知可用的对照端口（MySQL），否则没有基准：
+    # 若所有端口都失败，可能是目标主机整体不可达，而非某个端口没监听。
+    if not args.no_external and host and (args.external or TCP_FAILED_PORTS):
+        ports = list(TCP_FAILED_PORTS)
+        control = int(cfg.get("MYSQL_PORT", "3306") or 3306)
+        if control not in ports and cfg.get("MYSQL_HOST", "").strip() == host:
+            ports.append(control)
+        if ports:
+            show_external(host, sorted(set(ports)))
+
     return summary()
 
 
