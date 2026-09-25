@@ -1,5 +1,9 @@
 package com.tm.im.channel.config;
 
+import com.tm.im.channel.cluster.ActorRouteTable;
+import com.tm.im.channel.cluster.ClusterAwareConnectionRegistry;
+import com.tm.im.channel.cluster.NodeIdentity;
+import com.tm.im.channel.cluster.NodeProperties;
 import com.tm.im.channel.codec.Frames;
 import com.tm.im.channel.registry.LocalConnectionRegistry;
 import com.tm.im.channel.session.ConnectionRegistry;
@@ -22,7 +26,7 @@ import java.util.concurrent.atomic.AtomicInteger;
  * 长连接装配。
  */
 @Configuration
-@EnableConfigurationProperties(NettyProperties.class)
+@EnableConfigurationProperties({NettyProperties.class, NodeProperties.class})
 public class ChannelConfiguration {
 
     private static final Logger log = LoggerFactory.getLogger(ChannelConfiguration.class);
@@ -58,10 +62,31 @@ public class ChannelConfiguration {
         return executor;
     }
 
-    /** 供鉴权与推送路径复用。 */
+    /**
+     * 本节点身份（DESIGN §7.4）。
+     *
+     * <p>必须等 Netty 端口确定之后才能解析：{@code tm.netty.port=0} 表示
+     * 「由系统分配端口」（测试与容器里常用），而按 0 推导出来的 nodeId
+     * 会让所有节点撞成同一个 —— 那正是这个类要防的那种缺陷。
+     * 这里用配置值而不是实际绑定值，是因为本 Bean 在 Netty 启动之前就要就绪
+     * （心跳得先登记存活）：{@code port=0} 时请显式配置 {@code tm.node.id}。
+     */
     @Bean
-    public ConnectionRegistry connectionRegistry() {
-        return new LocalConnectionRegistry();
+    public NodeIdentity nodeIdentity(NodeProperties properties, NettyProperties netty) {
+        return properties.resolve(netty.getPort());
+    }
+
+    /**
+     * 连接注册表：本地表 + 集群路由装饰。
+     *
+     * <p>容器里只暴露装饰后的这一个：本地实现自己不再声明为 Spring Bean
+     * （否则按类型注入会有两个候选，启动即报歧义），这样「注册连接」与
+     * 「发布路由」之间那条不变式就不可能被绕过 —— 见
+     * {@link ClusterAwareConnectionRegistry}。
+     */
+    @Bean
+    public ConnectionRegistry connectionRegistry(ActorRouteTable routeTable) {
+        return new ClusterAwareConnectionRegistry(new LocalConnectionRegistry(), routeTable);
     }
 
     /**

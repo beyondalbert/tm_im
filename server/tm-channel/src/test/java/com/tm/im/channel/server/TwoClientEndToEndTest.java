@@ -1,5 +1,7 @@
 package com.tm.im.channel.server;
 
+import com.tm.im.channel.cluster.ClusterAwareConnectionRegistry;
+import com.tm.im.channel.cluster.RecordingActorRouteTable;
 import com.tm.im.channel.codec.MessageMapper;
 import com.tm.im.channel.config.ChannelConfiguration;
 import com.tm.im.channel.config.NettyProperties;
@@ -177,6 +179,7 @@ class TwoClientEndToEndTest {
     private static NettyProperties properties;
     private static InMemoryIdentity identity;
     private static LocalConnectionRegistry registry;
+    private static RecordingActorRouteTable routeTable;
     private static ThreadPoolExecutor businessExecutor;
     private static InMemoryMessagePort messages;
     private static NettyServer server;
@@ -198,10 +201,14 @@ class TwoClientEndToEndTest {
         properties.setMaxFramesPerSecond(1_000);
 
         registry = new LocalConnectionRegistry();
+        // 集群路由用替身（不连 Redis）：本类验证的是「路由的发布/释放时机跟随连接生命周期」，
+        // 而「Redis 上的键长什么样」由 ClusterRedisIT 用真实 Redis 验证。
+        routeTable = new RecordingActorRouteTable("e2e-node");
         businessExecutor = new ChannelConfiguration().nettyBusinessExecutor(properties);
         messages = new InMemoryMessagePort();
 
-        server = new NettyServer(properties, identity.service(), registry, businessExecutor,
+        server = new NettyServer(properties, identity.service(),
+                new ClusterAwareConnectionRegistry(registry, routeTable), businessExecutor,
                 messages, java.time.ZoneId.of("Asia/Shanghai"),
                 new MessageMapper(java.time.ZoneId.of("Asia/Shanghai")));
         server.start();
@@ -754,6 +761,64 @@ class TwoClientEndToEndTest {
         }
         // close() 之后服务端的 channelInactive 是异步的，这里等到它生效为止
         awaitCondition("连接断开后注册表应更新", () -> !registry.isOnline(BOT));
+    }
+
+    @Test
+    @DisplayName("集群路由跟随连接生命周期：鉴权成功即发布，最后一条连接断开才释放")
+    void routeFollowsConnectionLifecycle() throws Exception {
+        awaitCondition("上一条连接的路由应已释放（避免用例间互相影响）", () -> !routeTable.isBound(ALICE));
+
+        try (RawClient alice = webSocket()) {
+            authenticate(alice, 1, identity.jwt(ALICE), "web-1");
+
+            // 关键：路由必须在 AUTH_OK 发出之前就位。客户端拿到 AUTH_OK 的瞬间，
+            // 别的节点就可能开始因为它而发消息过来 —— 那一刻查不到路由，消息就白推一次。
+            assertThat(routeTable.isBound(ALICE))
+                    .as("收到 AUTH_OK 时路由必须已经发布（不能等下一次心跳或某个异步任务）")
+                    .isTrue();
+            assertThat(routeTable.bindCalls()).contains(ALICE);
+        }
+
+        awaitCondition("连接断开后集群路由应被释放", () -> !routeTable.isBound(ALICE));
+        assertThat(routeTable.unbindCalls()).contains(ALICE);
+    }
+
+    @Test
+    @DisplayName("顶号后路由必须保留给新连接：否则该账号在线、却收不到任何跨节点推送")
+    void kickedConnectionKeepsTheRouteOfTheNewOne() throws Exception {
+        try (RawClient old = webSocket(); RawClient fresh = tcp()) {
+            authenticate(old, 1, identity.jwt(ALICE), "web-1");
+            authenticate(fresh, 1, identity.jwt(ALICE), "web-2");
+
+            old.expectFrame("顶号通知");
+            assertThat(old.isClosedByPeer()).as("顶号后旧连接必须被关闭").isTrue();
+
+            // 旧连接被关闭后，服务端会为它跑一次 channelInactive（路由的释放点就在那里）。
+            // 这里断言的是「什么都不该发生」，因此没法用条件轮询去等：
+            // 错误实现是同步的一次 Redis 删除（毫秒级），给足一拍就足以暴露。
+            Thread.sleep(200);
+
+            assertThat(routeTable.isBound(ALICE))
+                    .as("新连接还在本节点，路由被旧连接的清理动作删掉 = 他明明在线却收不到推送")
+                    .isTrue();
+            assertThat(registry.isOnline(ALICE)).isTrue();
+            assertPingPong(fresh, 5);
+        }
+    }
+
+    @Test
+    @DisplayName("Redis 抖动时路由发布失败：AUTH 仍必须成功（不能把一次 Redis 抖动放大成「全站登不上」）")
+    void routePublishFailureStillAllowsLogin() throws Exception {
+        routeTable.failBindAlways();
+        try (RawClient bot = tcp()) {
+            Map<Integer, Object> auth = authenticate(bot, 1, BOT_API_KEY, "sdk-1");
+            assertThat(RawProto.number(auth, AR_ACTOR_ID)).isEqualTo(BOT);
+            assertThat(registry.isOnline(BOT)).as("本地连接照常建立").isTrue();
+            assertPingPong(bot, 2);
+        } finally {
+            // 服务端是静态共用的：不恢复的话，后面任何检查路由的用例都会红在错误的地方。
+            routeTable.resetFailures();
+        }
     }
 
     // ------------------------------------------------------------------

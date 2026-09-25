@@ -6,7 +6,6 @@ import com.tm.im.channel.session.TmConnection;
 import com.tm.im.proto.transport.KickReason;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
-import org.springframework.stereotype.Component;
 
 import java.util.Collection;
 import java.util.List;
@@ -29,10 +28,16 @@ import java.util.concurrent.atomic.LongAdder;
  *       触发一次清理。</li>
  *   <li><b>不在 IO 线程做逐连接写之外的事</b>。这里所有方法都是 O(1) 的 Map 操作
  *       加一次 {@code writeAndFlush}，没有 DB、没有 Redis ——
- *       跨节点投递（Redis Pub/Sub）会由上层实现，不在此处。</li>
+ *       跨节点投递（Redis Pub/Sub）由 {@code ClusterAwareConnectionRegistry} 与
+ *       推送口负责，不在此处。</li>
  * </ol>
+ *
+ * <p>它<b>不</b>声明为 {@code @Component}：装配由
+ * {@code ChannelConfiguration#connectionRegistry} 负责，那里会把本类包一层集群路由
+ * （{@code ClusterAwareConnectionRegistry}）。自己注册成 Bean 的话，容器里会同时存在
+ * 本地实现与装饰后的实现两个 {@code ConnectionRegistry}，按类型注入直接报歧义 ——
+ * 而「装配期就报错」已经比「运行时注入了少一层的那一个」好，仍然不如只有一处装配。
  */
-@Component
 public class LocalConnectionRegistry implements ConnectionRegistry {
 
     private static final Logger log = LoggerFactory.getLogger(LocalConnectionRegistry.class);

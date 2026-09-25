@@ -57,6 +57,12 @@ SERVICE_CHECKS = [
      "运行时配置与当前 local-conn.env 一致（--check）", "", ["--check"]),
     ("collation",   "probe_collation.py",
      "实测服务端排序规则等价性（决定 handle 唯一性口径）", "pymysql", []),
+    # 集群路由（tm:route / tm:node）的规则几乎只在「多实例 + 出故障」时才显形：
+    # 顶号误删新连接的路由、节点键不带 TTL、解绑没有 CAS、续期失败不重新注册……
+    # 13 条变异里有 5 条要跑集成测试（真实 Redis），所以放在这一组。
+    # 只跑不需要外部服务的那 8 条： python tools/mutate_cluster_routing.py --unit-only
+    ("mutate-cluster", "mutate_cluster_routing.py",
+     "变异测试：集群路由/节点探活的 13 条规则都有测试钉住", "", []),
 ]
 
 USE_COLOR = sys.stdout.isatty()

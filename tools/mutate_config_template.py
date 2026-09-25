@@ -3,7 +3,7 @@
 """变异测试：证明「模板一致性校验器」不是摆设。
 
 一个从没红过的校验器与没有校验器是等价的 —— 它只是让 `verify_all` 多打一行 OK。
-所以这里对模板注入 5 类**真实发生过**的缺陷，逐个确认校验器会失败，
+所以这里对模板注入 6 类**真实发生过**的缺陷，逐个确认校验器会失败，
 并且失败信息里能指出是哪个键。
 
 注入的缺陷都只写进临时文件，绝不碰仓库里的模板。
@@ -53,12 +53,24 @@ def mutate_drop_section(text: str) -> str:
     return re.sub(r"^  identity:\n(?:    .*\n|\n)*", "", text, count=1, flags=re.M)
 
 
+def mutate_node_id_hardcoded(text: str) -> str:
+    """给节点标识一个固定默认值。
+
+    与当年的 `worker-id: ${TM_WORKER_ID:1}` 是同一类陷阱，只是危害换了个地方：
+    所有实例拿到同一个 nodeId → {@code tm:route} 指向错误的进程，
+    消息被投到没有该连接的机器上，而发送方报告推送成功。
+    单实例测试永远发现不了它。
+    """
+    return re.sub(r"\$\{TM_NODE_ID:auto\}", "${TM_NODE_ID:node-1}", text, count=1)
+
+
 MUTATIONS = [
     ("模板缺项", mutate_drop_key, "tm.netty.auth-timeout-ms"),
     ("默认值与代码不一致", mutate_change_value, "tm.netty.heartbeat-idle-seconds"),
     ("键名拼写错误", mutate_typo_key, "tm.netty.max-frams-per-second"),
     ("密钥被写了默认值", mutate_secret_default, "tm.identity.jwt-secret"),
     ("整段配置缺失", mutate_drop_section, "tm.identity"),
+    ("节点标识被写死默认值", mutate_node_id_hardcoded, "tm.node.id"),
 ]
 
 
@@ -107,7 +119,7 @@ def main() -> int:
     if failed:
         print(f"变异测试失败 {failed}/{len(MUTATIONS) + 1} —— 校验器存在盲区")
         return 1
-    print(f"变异测试通过 {len(MUTATIONS)}/{len(MUTATIONS)} —— 5 类缺陷全部被捕获，校验器不是摆设")
+    print(f"变异测试通过 {len(MUTATIONS)}/{len(MUTATIONS)} —— 全部缺陷都被捕获，校验器不是摆设")
     return 0
 
 

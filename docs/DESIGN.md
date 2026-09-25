@@ -419,6 +419,28 @@ IO 线程：解码 → 鉴权 → 组装任务 → 扔进 businessGroup → 立�
 4. 只有 B 订阅该频道 → 收到后查本地连接表 → 写 Channel
 ```
 
+**实现状态（M3）**
+
+| 部分 | 现状 |
+|---|---|
+| 本地连接表 | 已实现：`LocalConnectionRegistry`（一个 Actor 在本节点一条连接，新连接顶旧的并回 `CMD_KICK`） |
+| 全局路由 | 已实现：`tm:route:{actorId}` → nodeId，跟随连接生命周期自动发布/释放 |
+| 节点注册与探活 | 已实现：`tm:node:{nodeId}` + TTL + 心跳（`tm.node.ttl` / `tm.node.heartbeat-seconds`） |
+| 跨节点投递 `tm:push:{nodeId}` | **未实现**：目标 Actor 不在本节点时推送返回 0（消息已落库，等对方重连后按 `last_seq` 走 SYNC 补齐） |
+
+两条容易被改错、且都有变异测试钉住的实现约定（`tools/mutate_cluster_routing.py`）：
+
+- **路由键不带 TTL**，判活交给 `tm:node:{nodeId}`。逐条续期几十万条路由不现实，
+  而不续期会让「长时间没在别处被推送过的在线用户」的路由悄悄过期——他还连着，却再也收不到推送。
+  指向已死节点的路由**刻意不删**：节点进程重启/短时失联后重新注册同一个 nodeId 时，
+  那些仍连着的连接会立刻重新可路由（删了就只能等他们重连）。
+- **解绑是 CAS**（路由仍指向本节点才删）。客户端换节点重连时，「新节点 bind」与
+  「旧节点上那条连接的 `channelInactive`」之间没有顺序保证，无条件删会删掉刚写入的新绑定——
+  该用户在其连接存活期间收不到任何跨节点推送，且无法自愈。
+
+节点标识用 `tm.node.id`（默认 `auto` = 「主机名:Netty 端口」推导）。它与 `tm.snowflake` 的节点号
+**不是一回事**，但有一条共同要求：多实例部署必须各不相同。
+
 ### 7.5 协议帧（Protobuf 草案）
 
 > 📄 **完整协议定义见 [`proto/transport.proto`](../proto/transport.proto)**（已用 protoc 编译验证），
@@ -848,7 +870,7 @@ Client → CMD_SYNC{cursors:[(conv_id, since_seq)], limit}
 | 会话 seq 计数 | `tm:seq:{convId}` | STRING + INCR |
 | 会话成员集 | `tm:conv:{convId}:members` | SET |
 | 幂等短路 | `tm:idem:{convId}:{senderId}:{clientMsgId}` | STRING + TTL |
-| 跨节点推送 | `tm:push:{nodeId}` | PUB/SUB |
+| 跨节点推送 | `tm:push:{nodeId}` | PUB/SUB（未实现，见 §7.4 实现状态） |
 | 限流 | `tm:rl:{actorId}:{window}` | STRING + INCR + EXPIRE |
 | 广场热 feed | `tm:feed:{actorId}` | ZSET |
 | 未读数 | `tm:unread:{actorId}` | HASH |

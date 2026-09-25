@@ -37,9 +37,28 @@
       <artifactId>spring-boot-starter</artifactId>
     </dependency>
 
+    <!-- 集群路由与节点探活（DESIGN §7.4 / §10.4）：tm:route:{actorId}、tm:node:{nodeId}。
+         Redis 的类本来就随 tm-storage 传递到这里，但仍然显式声明：
+         这条连接是「谁用就谁声明」，而不是「碰巧能编译过」。
+         不写 <version>：由 Spring Boot BOM 决定。 -->
+    <dependency>
+      <groupId>org.springframework.boot</groupId>
+      <artifactId>spring-boot-starter-data-redis</artifactId>
+    </dependency>
+
     <dependency>
       <groupId>org.springframework.boot</groupId>
       <artifactId>spring-boot-starter-test</artifactId>
+      <scope>test</scope>
+    </dependency>
+
+    <!-- 集成测试设施（ItEnv / RedisItConfig）复用 tm-storage 的测试代码：
+         真实 Redis 的连接参数只应该有一份。 -->
+    <dependency>
+      <groupId>com.tm.im</groupId>
+      <artifactId>tm-storage</artifactId>
+      <version>${project.version}</version>
+      <type>test-jar</type>
       <scope>test</scope>
     </dependency>
   </dependencies>

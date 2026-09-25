@@ -11,10 +11,7 @@ import org.mybatis.spring.annotation.MapperScan;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.ComponentScan;
 import org.springframework.context.annotation.Configuration;
-import org.springframework.data.redis.connection.RedisPassword;
-import org.springframework.data.redis.connection.RedisStandaloneConfiguration;
-import org.springframework.data.redis.connection.lettuce.LettuceConnectionFactory;
-import org.springframework.data.redis.core.StringRedisTemplate;
+import org.springframework.context.annotation.Import;
 import org.springframework.jdbc.datasource.DataSourceTransactionManager;
 import org.springframework.transaction.PlatformTransactionManager;
 import org.springframework.transaction.annotation.EnableTransactionManagement;
@@ -37,11 +34,16 @@ import org.springframework.transaction.annotation.EnableTransactionManagement;
  * 漂移，而漂移的表现是「集成测试里某个 Bean 找不到」——那时才会有人去补一行。
  * 扫描则保证容器与生产装配一致（仓储都在 {@code com.tm.im.storage.repository} 下，
  * 依赖只有 Mapper 与 Redis 模板，这里都已提供）。
+ *
+ * <p>Redis 那部分装配在 {@link RedisItConfig}（本类 {@code @Import} 它）：
+ * 只依赖 Redis 的集成测试（如 tm-channel 的 {@code ClusterRedisIT}）直接用它就够了，
+ * 不必为了几条 Redis 断言先把 ShardingSphere + MySQL 拉起来。
  */
 @Configuration
 @EnableTransactionManagement
 @ComponentScan(basePackageClasses = ConversationRepositoryImpl.class)
 @MapperScan(basePackageClasses = ConversationMapper.class)
+@Import(RedisItConfig.class)
 public class ItSpringConfig {
 
     /** 走分片驱动；连接池开小一点，测试不需要几十条连接。 */
@@ -72,25 +74,6 @@ public class ItSpringConfig {
     @Bean
     public PlatformTransactionManager transactionManager(HikariDataSource dataSource) {
         return new DataSourceTransactionManager(dataSource);
-    }
-
-    @Bean
-    public LettuceConnectionFactory redisConnectionFactory() {
-        RedisStandaloneConfiguration cfg = new RedisStandaloneConfiguration(
-                ItEnv.get("redis.host"), ItEnv.getInt("redis.port"));
-        cfg.setDatabase(ItEnv.getInt("redis.db"));
-        String pwd = ItEnv.getOrEmpty("redis.password");
-        if (!pwd.isEmpty()) {
-            cfg.setPassword(RedisPassword.of(pwd));
-        }
-        return new LettuceConnectionFactory(cfg);
-    }
-
-    @Bean
-    public StringRedisTemplate stringRedisTemplate(LettuceConnectionFactory factory) {
-        StringRedisTemplate template = new StringRedisTemplate(factory);
-        template.afterPropertiesSet();
-        return template;
     }
 
     /**
