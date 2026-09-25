@@ -874,6 +874,11 @@ Client → CMD_SYNC{cursors:[(conv_id, since_seq)], limit}
 | 限流 | `tm:rl:{actorId}:{window}` | STRING + INCR + EXPIRE |
 | 广场热 feed | `tm:feed:{actorId}` | ZSET |
 | 未读数 | `tm:unread:{actorId}` | HASH |
+| 刷新会话（一次性凭证） | `tm:rt:{sha256(refresh_token)}` → `{"actorId":…,"deviceId":…}` | STRING + TTL |
+
+> `tm:rt:*` 的值里只有 actorId 与设备标识，**不含**任何可用凭证（明文只在响应里出现一次）。
+> 「用过即失效」靠 `GETDEL`（原子取走并删除），「没用过」靠 TTL 自己消失——
+> 所以这张表里少了一行“清理任务”，也仍然不需要它。
 
 ### 10.5 MySQL 层面的保障
 
@@ -1136,6 +1141,37 @@ java -jar tm-app.jar \
 | **M9 管理后台** | `tm-admin.jar`（用户/内容/Agent 管理） | 可封禁、可查日志 |
 | **M10 单 JAR 打包** | 前端构建注入 + SPA 回退 + 启动脚本 | `java -jar` 一键跑通 |
 | **M11 压测调优** | 连接数/吞吐压测 + 慢查询优化 | 达成 §10.6 SLO |
+
+### 14.1 M3 实现状态（逐项）
+
+M3 的验收标准是「浏览器双开互发文字，seq 严格递增」。它拆成两半：
+**长连接那半**（`CMD_SEND` / `CMD_SYNC` / 扇出）在 M2 收尾时已经做完，
+**应用与 REST 那半**（可启动的 JAR + 账号体系 + `/v1` 接口 + 前端）从这里开始。
+
+| 部分 | 现状 | 证据 |
+|---|---|---|
+| 消息写入（seq / 幂等 / 自愈） | 已实现 | `MessageSendIT`（真实 MySQL + Redis） |
+| 断点续传 `CMD_SYNC` | 已实现 | `MessageSyncIT` + `mutate_sync_read_path.py`（10 变异） |
+| 全局路由 `tm:route` / 探活 `tm:node` | 已实现 | `ClusterRedisIT` + `mutate_cluster_routing.py`（13 变异） |
+| **应用启动**（`tm-app` 可 `java -jar`） | 已实现 | `AppHttpIT`：`@SpringBootTest` 真实启动 Tomcat + Netty + ShardingSphere + Redis |
+| **账号：注册 / 登录 / 刷新 / 登出** | 已实现 | `AccountServiceTest`（34 用例）+ `AppHttpIT` 全链路 |
+| **口令存储**（PBKDF2，可升级） | 已实现 | `PasswordHashesTest`（10 用例） |
+| **REST 鉴权与统一信封** | 已实现 | `ApiExceptionHandlerTest`（13 用例）+ `AppHttpIT` |
+| `GET /v1/me` | 已实现 | `AppHttpIT`（含 snake_case 与时间格式断言） |
+| 会话 / 消息 / 好友 / 广场的 REST 接口 | **未实现**（§4–§7） | — |
+| 用户端 Vue 脚手架 | **未实现** | — |
+| 跨节点投递 `tm:push:{nodeId}` | **未实现** | 见 §7.4 |
+
+启动集成测试（`AppHttpIT`）第一次跑就拓出两个“只在真实装配下才存在”的缺陷，
+两个都是**应用根本起不来**那一类，而在它之前仓库里所有测试都是绿的：
+
+| 缺陷 | 症状 | 根因 |
+|---|---|---|
+| `tm-channel` 的 `MessageMapper` 与 `tm-storage` 的 MyBatis `MessageMapper` 类名相同 | `ConflictingBeanDefinitionException`（Bean 名都是 `messageMapper`） | 容器 Bean 名默认取类短名 |
+| 测试支撑类 `ItSpringConfig` 随 test-jar 进了生产容器的扫描范围 | `NoUniqueBeanDefinitionException`（两个 `ConversationRepository`） | 扫描根宽到 `com.tm.im`，而测试配置也在其中 |
+
+两者的共同点是：**测试自己的容器看不到**（`ItSpringConfig` 只扫 `com.tm.im.storage.repository`，
+`MockMvc` 根本不建容器），所以再多的单测也不会发现它们。
 
 ---
 

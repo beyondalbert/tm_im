@@ -1,6 +1,6 @@
 package com.tm.im.channel.server;
 
-import com.tm.im.channel.codec.MessageMapper;
+import com.tm.im.channel.codec.TransportMessageMapper;
 import com.tm.im.channel.codec.WsBinaryFrameDecoder;
 import com.tm.im.channel.codec.WsBinaryFrameEncoder;
 import com.tm.im.channel.config.NettyProperties;
@@ -62,7 +62,7 @@ public class ChannelPipelineInitializer extends ChannelInitializer<SocketChannel
     private final ConnectionLimiter limiter;
     private final MessageCommandPort messages;
     private final ZoneId databaseZone;
-    private final MessageMapper messageMapper;
+    private final TransportMessageMapper messageMapper;
 
     /**
      * @param messages     业务命令的调用面（{@code MessageService}）。
@@ -79,7 +79,7 @@ public class ChannelPipelineInitializer extends ChannelInitializer<SocketChannel
                                       ConnectionLimiter limiter,
                                       MessageCommandPort messages,
                                       ZoneId databaseZone,
-                                      MessageMapper messageMapper) {
+                                      TransportMessageMapper messageMapper) {
         this.properties = properties;
         this.identityService = identityService;
         this.registry = registry;

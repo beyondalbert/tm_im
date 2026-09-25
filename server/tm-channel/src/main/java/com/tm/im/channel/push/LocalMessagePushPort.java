@@ -1,6 +1,6 @@
 package com.tm.im.channel.push;
 
-import com.tm.im.channel.codec.MessageMapper;
+import com.tm.im.channel.codec.TransportMessageMapper;
 import com.tm.im.channel.session.ConnectionRegistry;
 import com.tm.im.core.channel.MessagePushPort;
 import com.tm.im.domain.entity.Message;
@@ -19,9 +19,9 @@ import org.springframework.stereotype.Component;
 public class LocalMessagePushPort implements MessagePushPort {
 
     private final ConnectionRegistry registry;
-    private final MessageMapper mapper;
+    private final TransportMessageMapper mapper;
 
-    public LocalMessagePushPort(ConnectionRegistry registry, MessageMapper mapper) {
+    public LocalMessagePushPort(ConnectionRegistry registry, TransportMessageMapper mapper) {
         this.registry = registry;
         this.mapper = mapper;
     }

@@ -1,7 +1,7 @@
 package com.tm.im.channel.handler;
 
 import com.tm.im.channel.codec.Frames;
-import com.tm.im.channel.codec.MessageMapper;
+import com.tm.im.channel.codec.TransportMessageMapper;
 import com.tm.im.channel.config.ChannelConfiguration;
 import com.tm.im.channel.session.ChannelAttributes;
 import com.tm.im.channel.session.TmSession;
@@ -63,7 +63,7 @@ public class BusinessHandler extends SimpleChannelInboundHandler<Frame> {
     private final MessageCommandPort messages;
     private final ThreadPoolExecutor businessExecutor;
     private final ZoneId databaseZone;
-    private final MessageMapper messageMapper;
+    private final TransportMessageMapper messageMapper;
 
     /**
      * @param databaseZone 库里 {@code DATETIME} 所代表的时区（{@code tm.time.zone}）。
@@ -76,7 +76,7 @@ public class BusinessHandler extends SimpleChannelInboundHandler<Frame> {
      *                     所以这里复用同一个组件而不是自己拼字段。
      */
     public BusinessHandler(MessageCommandPort messages, ThreadPoolExecutor businessExecutor,
-                          ZoneId databaseZone, MessageMapper messageMapper) {
+                          ZoneId databaseZone, TransportMessageMapper messageMapper) {
         this.messages = messages;
         this.businessExecutor = businessExecutor;
         this.databaseZone = databaseZone;

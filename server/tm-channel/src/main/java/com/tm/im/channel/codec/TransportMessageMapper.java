@@ -26,13 +26,27 @@ import java.time.ZoneId;
  *   <li><b>时间口径</b>：{@code LocalDateTime} 无时区，必须用配置的
  *       {@code tm.time.zone} 解释（见 {@code TimeProperties}）。</li>
  * </ol>
+ *
+ * <p><b>为什么叫 Transport 而不是更短的 {@code MessageMapper}</b>：
+ * 那个名字已经被 {@code com.tm.im.storage.mapper.MessageMapper}（MyBatis 的
+ * 分片消息表映射器）占了，而 Spring 容器里的 Bean 名默认就是类的短名 ——
+ * 两者撞在一起时应用<b>启动直接失败</b>：
+ * <pre>
+ * ConflictingBeanDefinitionException: Annotation-specified bean name 'messageMapper'
+ *    for bean class [com.tm.im.storage.mapper.MessageMapper] conflicts with existing,
+ *    non-compatible bean definition of same name and class [com.tm.im.channel.codec.MessageMapper]
+ * </pre>
+ * 这个缺陷在任何测试自己的容器里都碰不到（{@code ItSpringConfig} 只扫
+ * {@code com.tm.im.storage.repository}，{@code MockMvc} 根本不建容器），
+ * 它由 {@code tm-app} 的启动集成测试 {@code AppHttpIT} 抓到。
+ * 想知道「为什么不叫 MessageMapper」，看这一段就够了。
  */
 @Component
-public class MessageMapper {
+public class TransportMessageMapper {
 
     private final ZoneId zone;
 
-    public MessageMapper(ZoneId zone) {
+    public TransportMessageMapper(ZoneId zone) {
         this.zone = zone;
     }
 

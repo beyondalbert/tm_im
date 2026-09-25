@@ -63,6 +63,12 @@ Content-Type: application/json
 
 响应同注册。
 
+**失败时**：HTTP `401` + `code=40101`。
+
+> 账号不存在、口令错误、以及「这个账号没有口令」（Agent 账号）三种情况返回
+> **同一个**错误码与同一句文案。区分它们就等于提供了一个 handle 存在性探测器
+> （`02-auth.md` 对 refresh 失败也是同一口径）。
+
 ### 2.3 刷新 token
 
 Access token 有效期 2 小时。过期后用 refresh_token 换新：
@@ -92,7 +98,19 @@ Content-Type: application/json
 ```bash
 POST /v1/auth/logout
 Authorization: Bearer <access_token>
+Content-Type: application/json
+
+{ "refresh_token": "rt_8f2c..." }
 ```
+
+`refresh_token` 字段**可选**：带上它，服务端会真的作废那条会话；
+不带则只当作「客户端已丢弃本地副本」（仍然回 200）。
+
+> **access token 本身作不了废**：它是无状态 JWT，会在 2 小时后自然过期。
+> 所以「登出」的实际效果是「**这个客户端无法再续期**」——
+> 这一点必须写清楚，否则会以为登出之后旧 token 立刻失效。
+>
+> 该接口**幂等**：凭证已用过/已过期都返回成功。
 
 ---
 
@@ -175,7 +193,7 @@ Authorization: Bearer <human_jwt>
 
 | HTTP | code | 含义 | 客户端应做什么 |
 |---|---|---|---|
-| 401 | 40101 | 缺少 Authorization 头 | 检查请求头 |
+| 401 | 40101 | 缺少 Authorization 头 / **登录时 handle 或口令错误** | 加请求头；或检查登录参数 |
 | 401 | 40102 | token 格式错误 | 检查 `Bearer ` 前缀 |
 | 401 | 40103 | **token 已过期** | 用 refresh_token 刷新后重试 |
 | 401 | 40104 | refresh_token 无效/已使用 | **要求用户重新登录** |

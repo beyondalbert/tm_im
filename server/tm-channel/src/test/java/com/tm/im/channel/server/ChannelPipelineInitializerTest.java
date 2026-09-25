@@ -54,7 +54,7 @@ class ChannelPipelineInitializerTest {
         initializer = new TestableInitializer(properties, identity.service(),
                 new LocalConnectionRegistry(), executor, new ConnectionLimiter(10),
                 new InMemoryMessagePort(), java.time.ZoneId.of("Asia/Shanghai"),
-                new com.tm.im.channel.codec.MessageMapper(java.time.ZoneId.of("Asia/Shanghai")));
+                new com.tm.im.channel.codec.TransportMessageMapper(java.time.ZoneId.of("Asia/Shanghai")));
     }
 
     @AfterAll
@@ -118,7 +118,7 @@ class ChannelPipelineInitializerTest {
                             ConnectionLimiter limiter,
                             com.tm.im.core.message.MessageCommandPort messages,
                             java.time.ZoneId databaseZone,
-                            com.tm.im.channel.codec.MessageMapper messageMapper) {
+                            com.tm.im.channel.codec.TransportMessageMapper messageMapper) {
             super(properties, identityService, registry, businessExecutor, limiter,
                     messages, databaseZone, messageMapper);
         }

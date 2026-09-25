@@ -156,13 +156,23 @@ mvn -o test
 
 # 集成测试：需要真实 MySQL 与 Redis，用 -Pit 显式激活
 uv run python tools/gen_runtime_config.py
-mvn -pl tm-storage -am test -Pit \
-  "-Dtm.it.config=deploy/conf/runtime/sharding.yaml" \
-  "-Dtm.it.properties=deploy/conf/runtime/it.properties"
+mvn -o test -Pit
 ```
 
 集成测试**刻意做成"缺配置就失败"**，而不是"缺配置就跳过"：
 跳过会让"没验证"与"验证通过"呈现同一个绿色。
+配置的默认位置是 `deploy/conf/runtime/`（由上一个命令生成），
+测试会从当前目录逐层向上找它；要换一份时用 `-Dtm.it.config=` / `-Dtm.it.properties=` 覆盖。
+
+> 这两个参数曾经是**必填**的（不传就直接失败，而报错说的是"缺凭据"，
+> 与"参数没给"是两件事）。改成「约定优先 + 参数覆盖」之后，
+> `mvn -o test -Pit` 本身就能跑，而两个测试类不再各持一套约定。
+
+启动集成测试是其中最重的一个（真启 Tomcat + Netty + ShardingSphere + Redis，约 16 秒）：
+
+```bash
+mvn -o -pl tm-app -am test -Pit -Dtest=AppHttpIT -Dsurefire.failIfNoSpecifiedTests=false
+```
 
 `gen_runtime_config.py` 除 sharding.yaml / application.yml 外还生成一份
 `deploy/conf/runtime/it.properties`：扁平键值对的 MySQL + Redis 坐标。
@@ -319,6 +329,44 @@ Lettuce 真实装配，并开 `@EnableTransactionManagement`——手工 `new` �
 这份容器以 test-jar 形式给 `tm-core` 复用：那套接法只应该有一份，
 两份必然漂移（而「测试的接法与生产不一致」是最难发现的偏差）。
 
+### 应用（M3）：从「能跑通」到「能启动」
+
+M2/M3 的早期成果都是「测试跑得通」，而**应用根本起不来**——四个应用模块只有 `pom.xml`，
+仓库里没有任何一个 `@SpringBootApplication`。补上入口类的第一件事就是写一个
+**真实启动**的集成测试（`tm-app` 的 `AppHttpIT`）：`@SpringBootTest` 把
+Tomcat + Netty + ShardingSphere + Redis + MyBatis-Plus + 全部配置类真启一遍，
+然后用真实 HTTP 断言一遍鉴权全链路。
+
+它第一次跑就拓出两个**应用根本起不来**的缺陷，而之前所有测试都是绿的：
+
+| 缺陷 | 报错 | 根因 |
+|---|---|---|
+| `tm-channel` 的 `MessageMapper` 与 `tm-storage` 的 MyBatis `MessageMapper` 类名相同 | `ConflictingBeanDefinitionException: bean name 'messageMapper'` | 容器 Bean 名默认取类的短名 |
+| test-jar 里的 `ItSpringConfig` 被扫进了生产容器 | `NoUniqueBeanDefinitionException: found 2: conversationRepositoryImpl, conversationRepositoryWithoutRedis` | 扫描根宽到 `com.tm.im`，测试配置也在其中 |
+
+第二个缺陷是第一种「测试工具反过来影响生产代码」的形态，修法与理由写在
+`TmAppApplication` 的类注释里（按包形状排除 `...it...`，而不是逐个类名列举）。
+
+### 账号与令牌（M3）：一次性 refresh_token 存在哪里
+
+`POST /v1/auth/{register,login,refresh,logout}` 与 `GET /v1/me` 已实现。
+几处不显眼但一旦错了很难查的决定：
+
+| 决定 | 不这么做会怎样 |
+|---|---|
+| 口令用 **PBKDF2-HMAC-SHA256**，迭代数写进哈希字符串（`pbkdf2-sha256$迭代数$盐$摘要`） | 迭代数写死在代码里：以后提高强度就等于把**所有人登出**。写进字符串则老哈希照旧能验，登录成功时顺手升级（`needsRehash`） |
+| 登录失败一律 `40101`，且账号不存在时**也跑一次等价昂贵的哈希** | 用响应时间就能枚举系统中存在哪些 handle；区分错误码则直接告诉他们哪一半猜对了 |
+| handle 先归一化（`strip()` + 小写）再比对 | 库里 `uk_handle` 用的是 `_ai_ci` 排序规则（大小写不敏感），不归一化就会出现「`existsHandle` 说没占用、`INSERT` 却撞唯一键」 |
+| **refresh_token 存 Redis**（`tm:rt:{sha256}`，值里只有 actorId/设备标识）而不是新开一张表 | 存表要改 DDL 生成器、实体生成器、校验器三处；而它的生命周期天然是 TTL + 一次性，与表格格不入 |
+| 「一次性」用 **`GETDEL`** 而不是 get + delete | 两个并发刷新请求会同时命中同一个凭证、各自换出一对新 token——这正是重放攻击的样子，而窗口只有微秒级，测试永远碰不到 |
+| 刷新的调用路径**再查一次账号状态** | refresh_token 能活 30 天，不查则「封禁的最坏生效延迟」从 2 小时变成 30 天 |
+| 字段名用 `spring.jackson.property-naming-strategy: SNAKE_CASE` 一处配置 | 逐字段写 `@JsonProperty` 的话，忘了那一个就静静变成 camelCase，客户端解析出一片 null |
+| 未映射路由回 **HTTP 404 + code 40400 的统一信封** | Spring 默认的错误 JSON（`{"timestamp":...}`）会逼客户端写两套解析逻辑，而其中一套只在 URL 拼错时才走到 |
+| 不用 CORS，改用 Vite 的 `server.proxy` | CORS 配错时 curl 全绿、只有浏览器红，而报错不指向任何一行服务端代码 |
+
+存储层的 Redis 语义（TTL、`GETDEL`、坏值处理、**Redis 挂了回 50002 而不是「凭证无效」**）
+由 `RedisRefreshTokenStoreIT` 在真实 Redis 上逐条钉住（9 个用例）。
+
 ### 断点续传读取（M3）：`CMD_SYNC` 怎么落地
 
 协议冻结之后剩下的就是那条「按 `(conv_id, since_seq)` 分页拉消息」的路径（DESIGN §10.2）。
@@ -390,10 +438,13 @@ S→C  payload = SyncResponse    // 「给你补消息」
 > 而如果是「协议允许客户端发、但分发里忘了写分支」，那属于服务端自己的疏漏，
 > 回的是 50000（用 40000 会是撒谎，静默会是灾难）。
 
-**接下去仍未做的事**：跨节点推送（`tm:route:{actorId}` + Pub/Sub）——
-目前扇出只覆盖「成员在本节点」的情况，多实例部署时另一节点上的连接收不到推送，
-它们靠重连后的 SYNC 补齐（这正是上面那条路径存在的意义）。
+**接下去仍未做的事**：`tm:push:{nodeId}` 的跨节点投递（Redis 路由与节点探活已完成，
+见 §7.4 实现状态）——目前扇出只覆盖「成员在本节点」的情况，多实例部署时另一节点上的连接
+收不到推送，它们靠重连后的 SYNC 补齐（这正是上面那条路径存在的意义）。
 归档/清理任务也还没做，所以 `SyncResponse.truncated` 目前恒为 `false`（§6.4 解释了为什么不猜）。
+
+REST 侧同样只做完了「能登录」（见 README 的「账号与令牌」一节）：
+`/v1` 的会话、消息、好友、广场接口，以及用户端 Vue 脚手架，都还没开始。
 
 ### SPI 守卫：为什么会有这么一个测试
 

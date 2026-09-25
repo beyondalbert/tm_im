@@ -17,7 +17,14 @@ https://<host>:8080/v1
 ```http
 Authorization: Bearer <jwt 或 api_key>
 Content-Type: application/json; charset=utf-8
+X-TM-Device-Id: web-chrome-131          # 可选
 ```
+
+`X-TM-Device-Id` 是客户端自报的设备标识，用于让服务端在日志与账号安全页面里
+回答「这个人同时在几个设备上」。它**不参与鉴权**（伪造它不会得到任何权限），
+也不需要与长连接 `AUTH` 帧里的 `device_id` 一致——但建议一致，否则两边的日志对不上。
+
+> 长连接有 `AUTH` 帧可以放 `device_id`，REST 没有帧，所以约定一个请求头。
 
 ### 1.3 统一响应包络
 

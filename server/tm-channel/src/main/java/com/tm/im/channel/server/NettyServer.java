@@ -1,7 +1,7 @@
 package com.tm.im.channel.server;
 
 import com.tm.im.channel.codec.Frames;
-import com.tm.im.channel.codec.MessageMapper;
+import com.tm.im.channel.codec.TransportMessageMapper;
 import com.tm.im.channel.config.ChannelConfiguration;
 import com.tm.im.channel.config.NettyProperties;
 import com.tm.im.channel.session.ConnectionRegistry;
@@ -59,7 +59,7 @@ public class NettyServer implements SmartLifecycle {
     private final ThreadPoolExecutor businessExecutor;
     private final MessageCommandPort messages;
     private final ZoneId databaseZone;
-    private final MessageMapper messageMapper;
+    private final TransportMessageMapper messageMapper;
 
     private EventLoopGroup bossGroup;
     private EventLoopGroup workerGroup;
@@ -73,7 +73,7 @@ public class NettyServer implements SmartLifecycle {
                        ThreadPoolExecutor nettyBusinessExecutor,
                        MessageCommandPort messages,
                        ZoneId databaseZone,
-                       MessageMapper messageMapper) {
+                       TransportMessageMapper messageMapper) {
         this.properties = properties;
         this.identityService = identityService;
         this.registry = registry;

@@ -2,7 +2,7 @@ package com.tm.im.channel.server;
 
 import com.tm.im.channel.cluster.ClusterAwareConnectionRegistry;
 import com.tm.im.channel.cluster.RecordingActorRouteTable;
-import com.tm.im.channel.codec.MessageMapper;
+import com.tm.im.channel.codec.TransportMessageMapper;
 import com.tm.im.channel.config.ChannelConfiguration;
 import com.tm.im.channel.config.NettyProperties;
 import com.tm.im.channel.registry.LocalConnectionRegistry;
@@ -210,7 +210,7 @@ class TwoClientEndToEndTest {
         server = new NettyServer(properties, identity.service(),
                 new ClusterAwareConnectionRegistry(registry, routeTable), businessExecutor,
                 messages, java.time.ZoneId.of("Asia/Shanghai"),
-                new MessageMapper(java.time.ZoneId.of("Asia/Shanghai")));
+                new TransportMessageMapper(java.time.ZoneId.of("Asia/Shanghai")));
         server.start();
         port = server.port();
         assertThat(port).as("服务端必须真的绑定了一个端口").isPositive();

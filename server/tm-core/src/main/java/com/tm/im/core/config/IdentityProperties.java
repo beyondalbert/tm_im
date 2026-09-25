@@ -25,6 +25,21 @@ public class IdentityProperties {
      */
     private Duration accessTokenTtl = Duration.ofHours(2);
 
+    /**
+     * refresh token 有效期，默认 30 天。
+     *
+     * <p><b>这个值直接决定「一次登录能待多久」</b>：access token 只有 2 小时，
+     * 但它每两小时就能用 refresh_token 自动续一次，所以实际的会话长度是
+     * <b>这个值</b>，而不是 access token 的有效期。把它当作「安全参数」时需要
+     * 同时看到两件事：客户端每 30 天至少要和用户交互一次（重新输口令），
+     * 而封禁的最坏生效延迟是这个值<b>除以</b>刷新频率——只要刷新时查一次账号状态
+     * （{@code AccountService.refresh} 就是这么做的），封禁的生效延迟就仍然是秒级。
+     *
+     * <p>它同时是 Redis 里 {@code tm:rt:*} 键的 TTL（见 RedisRefreshTokenStore），
+     * 所以改大它意味着存活的会话记录更多。
+     */
+    private Duration refreshTokenTtl = Duration.ofDays(30);
+
     public String getJwtSecret() {
         return jwtSecret;
     }
@@ -39,5 +54,13 @@ public class IdentityProperties {
 
     public void setAccessTokenTtl(Duration accessTokenTtl) {
         this.accessTokenTtl = accessTokenTtl;
+    }
+
+    public Duration getRefreshTokenTtl() {
+        return refreshTokenTtl;
+    }
+
+    public void setRefreshTokenTtl(Duration refreshTokenTtl) {
+        this.refreshTokenTtl = refreshTokenTtl;
     }
 }

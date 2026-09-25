@@ -90,6 +90,11 @@ tm:
     jwt-secret: ${TM_JWT_SECRET}
     # 访问令牌有效期。短有效期 + 鉴权时每次从库里读账号状态 = 封禁的最坏生效延迟
     access-token-ttl: 2h
+    # refresh_token 有效期（默认 30 天）。**它才是「一次登录能待多久」的真正上界**：
+    # access token 只有 2 小时，但每 2 小时能用 refresh_token 自动续一次。
+    # 它同时是 Redis 里 tm:rt:* 键的 TTL（一次性的旧凭证靠 GETDEL 作废，
+    # 没用过的靠 TTL 自己消失，所以不需要一份清理任务）。
+    refresh-token-ttl: ${TM_REFRESH_TOKEN_TTL:30d}
 
   # ---------- 时区口径 ----------
   time:

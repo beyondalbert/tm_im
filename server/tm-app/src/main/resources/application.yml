@@ -1,0 +1,105 @@
+# ============================================================
+# tm-app 的开发默认值
+# ------------------------------------------------------------
+# 这个文件只放「缺了就跑不起来」与「本地开发要能直接跑」的最小集合。
+# 部署期要改的一切都在 deploy/conf/application-external.yml.example 里
+# （那是运维视角的权威文档，且与代码有机器校验，见
+#  tools/verify_config_template.py）。
+#
+# 生产启动方式（不改这个文件）：
+#   java -jar tm-app.jar \
+#     --spring.config.additional-location=file:/etc/tm/ \
+#     --sharding.url=jdbc:shardingsphere:absolutepath:/etc/tm/sharding.yaml
+#
+# ★ 敏感值一律 ${ENV}，本文件不含任何可用凭据。
+# ============================================================
+spring:
+  application:
+    name: tm-app
+
+  # ---------- 数据源：交给 ShardingSphere 驱动接管 ----------
+  # 关键：driver-class-name 必须是 ShardingSphereDriver，而不是 mysql 驱动。
+  # 写错的表现是「!SHARDING 之类的标签不认识」或「表不存在」——都指向 YAML，
+  # 而不指向「驱动选错了」。
+  datasource:
+    driver-class-name: org.apache.shardingsphere.driver.ShardingSphereDriver
+    url: jdbc:shardingsphere:absolutepath:${TM_SHARDING_CONF:deploy/conf/sharding.yaml}
+
+  data:
+    redis:
+      host: ${TM_REDIS_HOST:127.0.0.1}
+      port: ${TM_REDIS_PORT:6379}
+      password: ${TM_REDIS_PASSWORD:}
+      database: ${TM_REDIS_DB:0}
+      timeout: 3000ms
+      connect-timeout: 3000ms
+
+  # ---------- JSON 字段命名 ----------
+  # 对外接口一律 snake_case（actor_id / refresh_token / display_name，
+  # 见 docs/integration/03-rest-api.md 的每个示例）。用一处全局配置而不是
+  # 逐字段 @JsonProperty：后者的失败形态是「新加的字段突然变成 camelCase」，
+  # 而它不会报错，只在客户端那边解析成 null。
+  jackson:
+    property-naming-strategy: SNAKE_CASE
+    # 可空字段仍输出 null（这是 Spring Boot 的默认值，显式写出来是因为它是契约）：
+    # 03-rest-api.md §2.1 的示例里有 "avatar_url": null。
+    # 改成 non_null 后，「字段不存在」与「字段为 null」就分不清了，
+    # 而 PATCH 类接口恰好需要区分这两者（不传 = 不改，传 null = 清空）。
+    default-property-inclusion: always
+
+  # 未映射的 URL 也走统一异常处理器（ApiExceptionHandler 把它翻成
+  # HTTP 404 + code 40400 的 ApiResponse），而不是 Spring 默认的那份
+  # {"timestamp":...,"error":"Not Found"}。否则客户端要写两套解析逻辑，
+  # 而其中一套只在「URL 拼错」时才走到。
+  #
+  # 注意它管的是 NoHandlerFoundException，而实际走到最多的是
+  # NoResourceFoundException（Boot 把未映射的 URL 交给静态资源处理器，
+  # 由它报 404）——两个类 ApiExceptionHandler 都接。
+  mvc:
+    throw-exception-if-no-handler-found: true
+
+server:
+  port: ${TM_HTTP_PORT:8080}
+
+# ---------- MyBatis-Plus ----------
+# 这两项**必须**是配置而不是 Java（StorageConfiguration 的类注释也这么写）：
+#   1. map-underscore-to-camel-case 决定 conv_id → convId 能不能自动对应；
+#   2. default-enum-type-handler 决定枚举落库是数字还是名字 ——
+#      这是「部署期就该一眼可查」的开关，藏在代码里出问题时得先翻源码。
+mybatis-plus:
+  configuration:
+    map-underscore-to-camel-case: true
+    default-enum-type-handler: com.baomidou.mybatisplus.core.handlers.MybatisEnumTypeHandler
+  global-config:
+    banner: false
+
+tm:
+  # ---------- Netty 长连接 ----------
+  # 本文件只写端口：其余项（线程数、水印、心跳…）在 tm-channel 的
+  # NettyProperties 里都有默认值，且模板里逐项列出。
+  netty:
+    port: ${TM_NETTY_PORT:8090}
+
+  # ---------- 身份与令牌 ----------
+  identity:
+    # 没有默认值是有意的：有默认值就等于仓库里躺着一把能用的钥匙。
+    # 未设置时启动直接失败（而不是「能跑但没有安全性」）——
+    # 后者往往会被带到生产。
+    jwt-secret: ${TM_JWT_SECRET}
+
+  # ---------- 时区口径 ----------
+  # 必须与 sharding.yaml 里 jdbcUrl 的 serverTimezone 一致，否则时间整体偏移几小时
+  # （消息照常收发、排序也对，只有显示的时间是错的）。
+  time:
+    zone: ${TM_TIME_ZONE:Asia/Shanghai}
+
+  # ---------- 节点标识（集群路由与探活） ----------
+  # auto = 按「主机名:Netty 端口」推导。多实例部署必须各自显式配置：
+  # 共用一个 nodeId 时路由会指向错误的进程。
+  node:
+    id: ${TM_NODE_ID:auto}
+
+logging:
+  level:
+    root: INFO
+    com.tm.im: ${TM_LOG_LEVEL:INFO}

@@ -33,6 +33,16 @@
       <artifactId>spring-boot-starter-test</artifactId>
       <scope>test</scope>
     </dependency>
+
+    <!-- 集成测试设施（ItEnv）：真实 MySQL / Redis 的坐标只应该有一份，
+         与 tm-core / tm-channel 同一做法。 -->
+    <dependency>
+      <groupId>com.tm.im</groupId>
+      <artifactId>tm-storage</artifactId>
+      <version>${project.version}</version>
+      <type>test-jar</type>
+      <scope>test</scope>
+    </dependency>
   </dependencies>
 
   <build>

@@ -1,5 +1,6 @@
 package com.tm.im.storage.sharding;
 
+import com.tm.im.storage.it.ItEnv;
 import org.junit.jupiter.api.AfterAll;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeAll;
@@ -129,26 +130,45 @@ class MessageShardingRoutingIT {
      *
      * <p>刻意不写成"找不到就跳过"：那会让 CI 上"配置没生成"与"路由正常"
      * 呈现同一个绿色。这里直接抛出带修复命令的异常。
+     *
+     * <p><b>为什么默认去找 {@code deploy/conf/runtime/sharding.yaml}</b>：
+     * 本类曾经要求必须传 {@code -Dtm.it.config}，而同模块的 {@code ItEnv}
+     * 已经能从约定路径自己找到它（并向上一层一层找）——于是「同一件事两套约定」：
+     * 一条路没人传参数时直接失败，另一条路什么都不传就能跑。
+     * 失败那条会让人以为是环境问题（“缺凭据”），而实际只是参数没给。
+     * 现在两边共用一份约定：{@code -Dtm.it.config} 仍然是个覆盖口，
+     * 但不再是必填项。
      */
     private static Path resolveConfig() {
         String prop = System.getProperty("tm.it.config", "").trim();
         if (prop.isEmpty()) {
-            throw new IllegalStateException(
-                    "缺少系统属性 tm.it.config —— 本测试需要真实 MySQL 凭据。\n"
-                            + "  生成： uv run python tools/gen_runtime_config.py\n"
-                            + "  运行： mvn -pl tm-storage -am test -Pit "
-                            + "\"-Dtm.it.config=deploy/conf/runtime/sharding.yaml\"");
+            return Paths.get(ItEnv.shardingConfig());
         }
         Path p = Paths.get(prop);
         if (!p.isAbsolute()) {
-            // 相对路径按仓库根解析：mvn 的工作目录是 server/，不是仓库根
-            Path fromRepo = Paths.get("").toAbsolutePath().getParent();
-            p = (fromRepo == null ? Paths.get("") : fromRepo).resolve(prop);
+            // 相对路径按仓库根解析：surefire 的工作目录是模块目录（server/tm-storage），
+            // 而仓库根在它上面两层。不写死层数：哪一层能找到这个相对路径，
+            // 哪一层就是仓库根（与 ItEnv 同一做法）。
+            p = findUpwards(prop);
         }
         if (!Files.isRegularFile(p)) {
-            throw new IllegalStateException("tm.it.config 指向的文件不存在: " + p);
+            throw new IllegalStateException(
+                    "tm.it.config 指向的文件不存在: " + p + "\n"
+                            + "  生成： uv run python tools/gen_runtime_config.py");
         }
         return p;
+    }
+
+    /** 从当前目录逐层向上找 {@code relative}；找不到时返回「当前目录 + relative」。 */
+    private static Path findUpwards(String relative) {
+        Path start = Paths.get("").toAbsolutePath();
+        for (Path dir = start; dir != null && dir.getNameCount() > 0; dir = dir.getParent()) {
+            Path candidate = dir.resolve(relative);
+            if (Files.isRegularFile(candidate)) {
+                return candidate;
+            }
+        }
+        return start.resolve(relative);
     }
 
     private static String firstGroup(String text, String regex) {

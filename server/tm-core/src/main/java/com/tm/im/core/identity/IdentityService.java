@@ -66,21 +66,37 @@ public class IdentityService {
             case JWT -> tokenService.verify(credential).actorId();
         };
 
+        Actor actor = requireActive(actorId);
+        log.debug("鉴权通过 actorId={} kind={} device={}", actor.getId(), kind, deviceId);
+        return new AuthContext(actor.getId(), actor.getHandle(), actor.getActorType(), kind, deviceId);
+    }
+
+    /**
+     * 「他现在还能不能用」—— 凭证已经验证过之后的那一半。
+     *
+     * <p>抽出来是因为刷新 token 的场景里，「你是谁」已经由服务端自己签发的
+     * refresh_token 证明了，只剩「账号还在不在、有没有被封」要查。
+     * 若那条路径自己写一遍状态判断，两处的口径就会漂移——
+     * 而这里漂移的后果是「封禁之后，用 refresh_token 的那条路仍然能换出新 token」，
+     * 即封禁只对一部分客户端生效。
+     *
+     * @throws com.tm.im.common.error.TmException 40401（账号不存在，如已注销但 token 未过期）
+     *                                             或 40301（已停用）
+     */
+    public Actor requireActive(long actorId) {
         Actor actor = actorRepository.findById(actorId)
                 .orElseThrow(() -> {
                     // 签名合法但账号不存在：只有「账号被删除、token 还没过期」
                     // 这一种可能。记 warn 而不是 info —— 它意味着有人拿着
                     // 一个已注销账号的凭证在连。
-                    log.warn("鉴权时账号不存在 actorId={} kind={}", actorId, kind);
+                    log.warn("账号不存在 actorId={}", actorId);
                     return new TmException(ErrorCode.ACTOR_NOT_FOUND, "actorId=" + actorId);
                 });
 
         if (actor.getStatus() == ActorStatus.SUSPENDED) {
             throw new TmException(ErrorCode.ACCOUNT_SUSPENDED, "actorId=" + actorId);
         }
-
-        log.debug("鉴权通过 actorId={} kind={} device={}", actor.getId(), kind, deviceId);
-        return new AuthContext(actor.getId(), actor.getHandle(), actor.getActorType(), kind, deviceId);
+        return actor;
     }
 
     /**

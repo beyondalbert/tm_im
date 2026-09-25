@@ -1,15 +1,21 @@
-"""清掉集成测试遗留的数据（MySQL 里 client_msg_id 以 it 开头的行 + Redis 里的集群键）。
+"""清掉集成测试遗留的数据（MySQL 里的消息行与测试账号 + Redis 里的集群键）。
 
-为什么需要这个脚本：测试正常结束时会用 TAG 精确清理，但如果断言失败、
+为什么需要这个脚本：测试正常结束时会自己精确清理（按 TAG / handle），但如果断言失败、
 进程被强杀、或 JVM 崩溃，清理就不会执行。残留行本身无害（都带 it 前缀），
 但会污染后续人工排查时的物理表内容。
 
 安全边界：
-  * MySQL：只删 `client_msg_id LIKE 'it%'` 的行，不 TRUNCATE、不 DROP；
+  * MySQL 消息：只删 `client_msg_id LIKE 'it%'` 的行，不 TRUNCATE、不 DROP；
+  * MySQL 账号：只删 handle 形如 `it_...` 的 actor 及其凭据，以及
+    **其 actor 行已不存在的孤儿 actor_secret**（它们永远登不上，且正是
+    “清理代码只执行了一半”的产物）；
   * Redis：只删 `tm:node:it-*`（测试节点）以及<b>值指向测试节点</b>的
     `tm:route:*`（测试用的 actorId 与真实雪花 id 区间完全不同，
     但真正可靠的判据是路由的值 —— 生产 nodeId 是「主机名:端口」或显式配置，
-    不会以 `it-` 开头）。
+    不会以 `it-` 开头）；
+  * Redis 刷新会话 `tm:rt:*` **不在此列**：键名是凭证的哈希，值里只有 actorId，
+    无法与生产会话可靠区分。集成测试把它的 TTL 调到分钟级（AppHttpIT 里 5 分钟），
+    所以残留会自己消失 —— 这比一个“看起来像能识别”的判据更安全。
 
 用法：
     uv run --with pymysql --with redis python tools/clean_it_leftovers.py [--apply] [--mysql|--redis]
@@ -117,6 +123,50 @@ def clean_redis(apply: bool) -> int:
         client.close()
 
 
+def clean_accounts(cur, apply: bool) -> int:
+    """清掉集成测试建的账号（{@code actor} + {@code actor_secret}）。
+
+    两类行，判定依据不同：
+
+    1. **handle 以 `it_` 开头的 actor** —— 与 message 的 `client_msg_id LIKE 'it%'`
+       同一思路。AppHttpIT 用这个前缀（handle 只能是字母数字下划线，所以是下划线）。
+    2. **孤儿 actor_secret**（其 actor_id 在 actor 表里已不存在）—— 它们**永远无法
+       登录**：`IdentityService` 先查 actor，查不到就是 40401，那张凭据行只是死重量。
+       真实成因就在本项目里：测试的清理代码曾一半按字段、一半按 handle，
+       actor 行被删了而凭据行留下。保守做法是「只清测试账号关联的行」，
+       但孤儿行与测试账号无关——它就是垃圾本身。
+
+    不直接 JOIN 删除：`actor_secret` 是非分片表，而取 id → 再按 id 删是两步确定的事，
+    在分片驱动下不需要把一条跨表 SQL 交给它解析。
+    """
+    cur.execute("SELECT id, handle FROM actor WHERE handle LIKE %s", (PREFIX + "\\_%",))
+    test_actors = cur.fetchall()
+
+    cur.execute(
+        "SELECT s.actor_id FROM actor_secret s "
+        "LEFT JOIN actor a ON a.id = s.actor_id WHERE a.id IS NULL")
+    orphans = [r[0] for r in cur.fetchall()]
+
+    ids = sorted({a[0] for a in test_actors} | set(orphans))
+    if not ids:
+        print("账号: 无遗留")
+        return 0
+
+    print(f"账号: actor {len(test_actors)} 行"
+          f"（handle 形如 {PREFIX}_...）、孤儿 actor_secret {len(orphans)} 行")
+    for row in test_actors:
+        print(f"  actor id={row[0]} handle={row[1]}")
+    if not apply:
+        return len(ids)
+
+    placeholders = ",".join(["%s"] * len(ids))
+    cur.execute(f"DELETE FROM actor_secret WHERE actor_id IN ({placeholders})", tuple(ids))
+    removed_secrets = cur.rowcount
+    cur.execute(f"DELETE FROM actor WHERE id IN ({placeholders})", tuple(ids))
+    print(f"  已删 actor {len(test_actors)} 行、actor_secret {removed_secrets} 行")
+    return len(ids)
+
+
 def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--apply", action="store_true", help="真正执行删除；默认只统计")
@@ -159,6 +209,8 @@ def main() -> int:
                     print(f"  {t}: 发现 {n} 行（未删除）")
                 total += n
             print(f"合计 {total} 行")
+
+            total += clean_accounts(cur, args.apply)
     finally:
         conn.close()
 
