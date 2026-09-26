@@ -2,6 +2,7 @@ package com.tm.im.core.config;
 
 import com.tm.im.common.id.IdGenerator;
 import com.tm.im.common.id.SnowflakeIdGenerator;
+import com.tm.im.core.conversation.ConversationProperties;
 import com.tm.im.core.identity.JwtTokenService;
 import com.tm.im.core.message.MessageProperties;
 import org.slf4j.Logger;
@@ -24,7 +25,7 @@ import java.time.ZoneId;
  */
 @Configuration
 @EnableConfigurationProperties({SnowflakeProperties.class, IdentityProperties.class,
-        TimeProperties.class, MessageProperties.class})
+        TimeProperties.class, MessageProperties.class, ConversationProperties.class})
 public class CoreConfiguration {
 
     private static final Logger log = LoggerFactory.getLogger(CoreConfiguration.class);

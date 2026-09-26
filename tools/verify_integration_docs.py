@@ -1,7 +1,7 @@
 """
 接入文档全量校验器。
 
-校验七件事，任何一项失败都会让接入方踩坑：
+校验八件事，任何一项失败都会让接入方踩坑：
   1. 文档中所有 hex 字节块能正确解码，且与 protobuf 官方编码一致
   2. 文档中「手写 protobuf 实现」的代码能被真实抽取并运行通过断言
   3. 文档中所有 JSON 代码块语法合法
@@ -10,14 +10,30 @@
      且「一个命令字只有一种方向与一种载荷」
   6. 06-no-sdk-guide.md 里那份手写客户端的命令字字典与 proto 一致
   7. 文档里引用的测试用例（`XxxTest.methodName`）真的存在
+  8. 文档里没有「长得像闭合标签」的字面文本
 
 第 6、7 项都是“文档里的另一份手写副本”：
   * 手写客户端的 CMD 字典漏一个命令字，接入方会把它解成“未知帧”；
   * 文档点名“这条规则由 xxx 用例钉住”时，用例改名/删掉后引用就变成了谎话——
     而读者会以为“有测试盯着”，于是放心改。
 
-运行：
-  uv run --with protobuf python tools/verify_integration_docs.py
+第 8 项不关心文档写得好不好，它关心的是**文档能不能被机器完整读出来**。
+
+背景（一次真实的排查阻塞）：很多工具——包括各类 Agent 的回显——用成对标签
+包装一次调用的结果，标签的闭合形态是：左方括号 + 斜杠 + 标签名 + 右方括号。
+而本仓库曾经在 README 里用「左方括号 + 斜杠 + {id} + 右方括号」表示“这段路径
+可选”（写在 GET /v1/conversations 之后），于是那层解析器把它读成一个**没有开标签
+的闭合标签**，报出：
+
+    closing tag ... doesn't match any open tag
+
+后果比报错本身严重：**整次读取的结果被丢弃**，而且这是确定性的——只要输出里
+包含那一行就必然失败，重试永远得到同一个错误。它看起来像“工具挂了/文件太大”，
+实际上是文档里的一对相邻字符。修法是换个写法（可选路径段展开成两条真实路由），
+而不是加转义：夹一个反斜杠去不掉那对相邻字符。
+
+注意：本文件自身必须不包含该相邻组合，否则校验器自己就成了读不出来的文件。
+所以下面构造正则与说明时一律用 chr() 拼装，并在文件末尾做一次自检。
 """
 import io
 import json
@@ -49,6 +65,12 @@ def ok(msg):
 def info(msg):
     notes.append(msg)
     print("  [INFO] " + msg)
+
+
+# 构造「左方括号紧跟斜杠」这个组合，供第 8 项使用。
+# 写成 chr() 而不是字面量是本文件自己的约束，见模块 docstring。
+L = chr(0x5B)   # 左方括号
+S = chr(0x2F)   # 斜杠
 
 
 def read(p):
@@ -746,6 +768,34 @@ def check_doc_test_references():
     ok("校验 {} 处测试用例引用（对 {} 个测试类）".format(refs, len(index)))
 
 
+# ============================================================
+# 8. 文档里不能有「长得像闭合标签」的字面文本
+# ============================================================
+#
+# 形状构造见模块 docstring。这里刻意用 chr() 拼，而不是写字面量：
+# 本文件的任何一行只要含那对相邻字符，本文件自己就读不出来了。
+CLOSING_TAG_RE = re.compile(
+    re.escape(L) + S + r"[^\]\s]{0,60}\]")
+
+
+def check_no_tag_shaped_text():
+    print("\n" + "=" * 74)
+    print("8. 文档里没有「长得像闭合标签」的字面文本")
+    print("=" * 74)
+
+    scanned = 0
+    for path in doc_files():
+        scanned += 1
+        for lineno, line in enumerate(read(path).splitlines(), 1):
+            for m in CLOSING_TAG_RE.finditer(line):
+                fail(("{}:{} 出现 `{}`：这是「左方括号紧跟斜杠」，会被用成对标签"
+                      "包装工具输出的那层解析器当成没有开标签的闭合标签，" 
+                      "导致整次读取被丢弃且重试必然同样失败。"
+                      "把可选路径段展开成多条真实路由即可；夹一个反斜杠没用。"
+                      ).format(os.path.basename(path), lineno, m.group(0)))
+    ok("扫描 {} 个文档（README + docs/ 与 docs/integration/ 下全部 .md）".format(scanned))
+
+
 def main():
     out = check_hex_blocks()
     check_handwritten_proto(out)
@@ -754,6 +804,7 @@ def main():
     check_command_contract()
     check_nosdk_command_dict()
     check_doc_test_references()
+    check_no_tag_shaped_text()
     shutil.rmtree(out, ignore_errors=True)
 
     print("\n" + "=" * 74)

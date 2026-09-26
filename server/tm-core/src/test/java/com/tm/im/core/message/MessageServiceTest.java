@@ -12,6 +12,7 @@ import com.tm.im.domain.enums.ConvType;
 import com.tm.im.domain.enums.FriendshipStatus;
 import com.tm.im.domain.enums.MemberRole;
 import com.tm.im.domain.enums.MessageType;
+import com.tm.im.domain.repository.ConversationMembership;
 import com.tm.im.domain.repository.ConversationRepository;
 import com.tm.im.domain.repository.FriendshipRepository;
 import com.tm.im.domain.repository.MessageRepository;
@@ -83,7 +84,7 @@ class MessageServiceTest {
 
     private MessageService.SendCommand cmd(String text) {
         return new MessageService.SendCommand(CONV, ALICE, "c-1", MessageType.TEXT,
-                "{\"text\":\"" + text + "\"}", 0);
+                "{\"text\":\"" + text + "\"}", 0, true);
     }
 
     @Test
@@ -134,6 +135,45 @@ class MessageServiceTest {
     }
 
     @Test
+    @DisplayName("SYSTEM 消息：客户端来源一律 40302（它豁免好友校验，不能留绕道）")
+    void clientSystemMessageIsRejected() {
+        assertThatThrownBy(() -> service.send(new MessageService.SendCommand(
+                CONV, ALICE, "s-1", MessageType.SYSTEM,
+                "{\"action\":\"member_joined\",\"actor_id\":1}", 0, true)))
+                .isInstanceOf(TmException.class)
+                .extracting(e -> ((TmException) e).errorCode())
+                .isEqualTo(ErrorCode.PERMISSION_DENIED);
+
+        assertThat(conversations.nextSeqCalls).as("拒绝不能消耗序号").isZero();
+        assertThat(messages.insertCalls).isZero();
+        assertThat(push.recipients).isEmpty();
+    }
+
+    @Test
+    @DisplayName("SYSTEM 消息：服务端来源放行（建群通知走的就是这条路）")
+    void serverSystemMessageIsAccepted() {
+        MessageService.SendOutcome outcome = service.send(new MessageService.SendCommand(
+                CONV, ALICE, null, MessageType.SYSTEM,
+                "{\"action\":\"group_created\",\"actor_id\":1001}", 0, false));
+
+        assertThat(outcome.replayed()).isFalse();
+        assertThat(outcome.message().getSeq()).isEqualTo(1L);
+        assertThat(push.recipients).containsExactly(BOB);
+    }
+
+    @Test
+    @DisplayName("client_msg_id 超过 64 字符回 40002（非严格模式下会被截断成同一个幂等键）")
+    void tooLongClientMsgIdIsRejected() {
+        assertThatThrownBy(() -> service.send(new MessageService.SendCommand(
+                CONV, ALICE, "c".repeat(65), MessageType.TEXT, "{\"text\":\"hi\"}", 0, true)))
+                .isInstanceOf(TmException.class)
+                .extracting(e -> ((TmException) e).errorCode())
+                .isEqualTo(ErrorCode.INVALID_PARAMETER);
+
+        assertThat(conversations.nextSeqCalls).isZero();
+    }
+
+    @Test
     @DisplayName("序号撞主键：用库内最大 seq 自愈后重试，且重试成功")
     void seqCollisionTriggersSelfHealAndRetry() {
         messages.maxSeq = 41L;
@@ -181,7 +221,7 @@ class MessageServiceTest {
     void nonMemberIsRejectedEvenIfFriends() {
         assertThatThrownBy(() -> service.send(
                 new MessageService.SendCommand(CONV, 9999L, "c-9", MessageType.TEXT,
-                        "{\"text\":\"hi\"}", 0)))
+                        "{\"text\":\"hi\"}", 0, true)))
                 .isInstanceOf(TmException.class)
                 .extracting(e -> ((TmException) e).errorCode())
                 .isEqualTo(ErrorCode.NOT_A_MEMBER);
@@ -195,7 +235,7 @@ class MessageServiceTest {
 
         MessageService.SendOutcome outcome = service.send(
                 new MessageService.SendCommand(2001L, ALICE, "g-1", MessageType.TEXT,
-                        "{\"text\":\"大家好\"}", 0));
+                        "{\"text\":\"大家好\"}", 0, true));
 
         assertThat(outcome.message().getSeq()).isEqualTo(1L);
         assertThat(friendships.findCalls).as("群聊不该查好友关系（500 人群 = 500 次查询）").isZero();
@@ -217,13 +257,13 @@ class MessageServiceTest {
     @DisplayName("content 与 msg_type 不符：回 40009")
     void contentTypeMismatchIsRejected() {
         assertThatThrownBy(() -> service.send(new MessageService.SendCommand(
-                CONV, ALICE, "c-2", MessageType.TEXT, "{\"media_id\":123}", 0)))
+                CONV, ALICE, "c-2", MessageType.TEXT, "{\"media_id\":123}", 0, true)))
                 .isInstanceOf(TmException.class)
                 .extracting(e -> ((TmException) e).errorCode())
                 .isEqualTo(ErrorCode.CONTENT_TYPE_MISMATCH);
 
         assertThatThrownBy(() -> service.send(new MessageService.SendCommand(
-                CONV, ALICE, "c-3", MessageType.IMAGE, "{\"text\":\"hi\"}", 0)))
+                CONV, ALICE, "c-3", MessageType.IMAGE, "{\"text\":\"hi\"}", 0, true)))
                 .isInstanceOf(TmException.class)
                 .extracting(e -> ((TmException) e).errorCode())
                 .isEqualTo(ErrorCode.CONTENT_TYPE_MISMATCH);
@@ -233,7 +273,7 @@ class MessageServiceTest {
     @DisplayName("content 不是合法 JSON：回 40002（与字段缺失是两类问题）")
     void malformedJsonIsRejected() {
         assertThatThrownBy(() -> service.send(new MessageService.SendCommand(
-                CONV, ALICE, "c-4", MessageType.TEXT, "{\"text\":", 0)))
+                CONV, ALICE, "c-4", MessageType.TEXT, "{\"text\":", 0, true)))
                 .isInstanceOf(TmException.class)
                 .extracting(e -> ((TmException) e).errorCode())
                 .isEqualTo(ErrorCode.INVALID_PARAMETER);
@@ -243,7 +283,7 @@ class MessageServiceTest {
     @DisplayName("会话不存在：回 40402")
     void unknownConversationIsRejected() {
         assertThatThrownBy(() -> service.send(new MessageService.SendCommand(
-                8888L, ALICE, "c-5", MessageType.TEXT, "{\"text\":\"hi\"}", 0)))
+                8888L, ALICE, "c-5", MessageType.TEXT, "{\"text\":\"hi\"}", 0, true)))
                 .isInstanceOf(TmException.class)
                 .extracting(e -> ((TmException) e).errorCode())
                 .isEqualTo(ErrorCode.CONVERSATION_NOT_FOUND);
@@ -257,7 +297,7 @@ class MessageServiceTest {
         conversations.addMember(3001L, ALICE, 1L);
 
         MessageService.SendOutcome outcome = service.send(new MessageService.SendCommand(
-                3001L, ALICE, "big-1", MessageType.TEXT, "{\"text\":\"大家好\"}", 0));
+                3001L, ALICE, "big-1", MessageType.TEXT, "{\"text\":\"大家好\"}", 0, true));
 
         assertThat(outcome.message().getSeq()).isEqualTo(1L);
         assertThat(outcome.pushed()).as("大群转读扩散，一次都不推").isZero();
@@ -590,13 +630,29 @@ class MessageServiceTest {
         }
 
         @Override
-        public boolean addMember(long convId, long actorId, MemberRole role) {
-            throw new UnsupportedOperationException();
+        public boolean addMember(long convId, long actorId, MemberRole role,
+                                 java.time.LocalDateTime joinedAt) {
+            throw new UnsupportedOperationException("本测试不走建会话的写路径");
         }
 
         @Override
-        public List<Conversation> listByActor(long actorId, int limit) {
+        public void createGroup(Conversation conversation, List<ConversationMember> members) {
+            throw new UnsupportedOperationException("本测试不走建群路径");
+        }
+
+        @Override
+        public List<ConversationMembership> listMemberships(long actorId, int maxScan) {
             return List.of();
+        }
+
+        @Override
+        public List<ConversationMember> listMembers(long convId, int limit) {
+            return List.of();
+        }
+
+        @Override
+        public long countMembers(long convId) {
+            return members.getOrDefault(convId, List.of()).size();
         }
     }
 
@@ -684,6 +740,22 @@ class MessageServiceTest {
         @Override
         public long maxSeq(long convId) {
             return maxSeq;
+        }
+
+        @Override
+        public Optional<Message> findLatest(long convId) {
+            return stored.stream()
+                    .filter(m -> m.getConvId() == convId)
+                    .max(java.util.Comparator.comparingLong(Message::getSeq));
+        }
+
+        @Override
+        public List<Message> listBeforeSeq(long convId, long beforeSeq, int limit) {
+            return stored.stream()
+                    .filter(m -> m.getConvId() == convId && (beforeSeq <= 0 || m.getSeq() < beforeSeq))
+                    .sorted(java.util.Comparator.comparingLong(Message::getSeq).reversed())
+                    .limit(Math.max(1, limit))
+                    .toList();
         }
 
         @Override

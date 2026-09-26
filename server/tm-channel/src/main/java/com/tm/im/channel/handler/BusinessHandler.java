@@ -166,7 +166,11 @@ public class BusinessHandler extends SimpleChannelInboundHandler<Frame> {
                         request.getClientMsgId(),
                         convertType(request.getMsgType()),
                         request.getContentJson(),
-                        request.getReplyTo()));
+                        request.getReplyTo(),
+                        // 帧里的东西一律来自不可信客户端。有了这个标记，
+                        // 「客户端不许发 SYSTEM 消息」这条规则只需在 MessageService 里写一遍，
+                        // 而不是在 Netty handler 与 REST 控制器里各拦一道（两道就有一道会漏）。
+                        true));
                 // created_at_ms 是展示用的 Unix 毫秒。库里存的是 DATETIME（不含时区），
                 // 它的含义由 tm.time.zone 定义（MessageService 落库时就用那个时区取值），
                 // 所以这里必须用同一个时区换算回去，否则客户端看到的时间会差 8 小时。

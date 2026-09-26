@@ -212,7 +212,7 @@ class MessageSendIT {
     private MessageService.SendOutcome send(String text, String clientMsgId) {
         return messageService.send(new MessageService.SendCommand(
                 convId, alice, clientMsgId, MessageType.TEXT,
-                "{\"text\":\"" + text + "\"}", 0));
+                "{\"text\":\"" + text + "\"}", 0, true));
     }
 
     private List<Long> seqsInDb() {

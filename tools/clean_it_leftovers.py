@@ -9,6 +9,9 @@
   * MySQL 账号：只删 handle 形如 `it_...` 的 actor 及其凭据，以及
     **其 actor 行已不存在的孤儿 actor_secret**（它们永远登不上，且正是
     “清理代码只执行了一半”的产物）；
+  * MySQL 会话：只删「成员行指向已不存在的 actor」与「一个成员都没有」的会话，
+    以及**这些会话的消息**（按 conv_id 在 16 张物理分表上删）——
+    判据是「孤儿」而不是「id 长得像测试数据」（雪花号没有可判读的前缀）；
   * Redis：只删 `tm:node:it-*`（测试节点）以及<b>值指向测试节点</b>的
     `tm:route:*`（测试用的 actorId 与真实雪花 id 区间完全不同，
     但真正可靠的判据是路由的值 —— 生产 nodeId 是「主机名:端口」或显式配置，
@@ -16,6 +19,8 @@
   * Redis 刷新会话 `tm:rt:*` **不在此列**：键名是凭证的哈希，值里只有 actorId，
     无法与生产会话可靠区分。集成测试把它的 TTL 调到分钟级（AppHttpIT 里 5 分钟），
     所以残留会自己消失 —— 这比一个“看起来像能识别”的判据更安全。
+  * Redis 会话序号 `tm:seq:{convId}` 同上：键名里只有 convId，
+    但它的值只影响那个会话的取号，且消息插入时会自愈（see ConversationRepository#raiseSeqFloor）。
 
 用法：
     uv run --with pymysql --with redis python tools/clean_it_leftovers.py [--apply] [--mysql|--redis]
@@ -123,7 +128,7 @@ def clean_redis(apply: bool) -> int:
         client.close()
 
 
-def clean_accounts(cur, apply: bool) -> int:
+def clean_accounts(cur, apply: bool) -> list[int]:
     """清掉集成测试建的账号（{@code actor} + {@code actor_secret}）。
 
     两类行，判定依据不同：
@@ -150,21 +155,109 @@ def clean_accounts(cur, apply: bool) -> int:
     ids = sorted({a[0] for a in test_actors} | set(orphans))
     if not ids:
         print("账号: 无遗留")
-        return 0
+        return []
 
     print(f"账号: actor {len(test_actors)} 行"
           f"（handle 形如 {PREFIX}_...）、孤儿 actor_secret {len(orphans)} 行")
     for row in test_actors:
         print(f"  actor id={row[0]} handle={row[1]}")
     if not apply:
-        return len(ids)
+        return ids
 
     placeholders = ",".join(["%s"] * len(ids))
     cur.execute(f"DELETE FROM actor_secret WHERE actor_id IN ({placeholders})", tuple(ids))
     removed_secrets = cur.rowcount
     cur.execute(f"DELETE FROM actor WHERE id IN ({placeholders})", tuple(ids))
     print(f"  已删 actor {len(test_actors)} 行、actor_secret {removed_secrets} 行")
-    return len(ids)
+    return ids
+
+
+def clean_conversations(cur, tables: list[str], apply: bool, doomed_actors: list[int]) -> int:
+    """清掉集成测试遗留的会话、成员行与它们的消息。
+
+    为什么需要它：M3 的 REST 用例会建会话（`POST /v1/conversations/*`），
+    而会话表里没有任何「测试标记」列可依：`conversation` 只有
+    id/conv_type/title/owner_actor/seq_counter/pair_key/created_at，
+    而 id 是雪花号（没有可判读的前缀）。所以判据只能是**孤儿**：
+
+      1. 成员行的 actor 已经不在 `actor` 表里（测试账号以 it_ 开头，先被删了）
+         —— 也包括「本次将要被删的那批」，否则 dry-run 与 --apply 报的不是同一批数据；
+      2. 一个成员行都没有的会话（上面那些孤儿成员行被删完之后就会出现，
+         或者建会话时进程死在写成员行之前）。
+
+    这两个判据都不会误伤真实数据：一个成员都没有的会话在任何客户端里都打不开
+    （打开它就是 40303），而它的消息也永远没人能看到。
+
+    消息必须**逐张物理分表**删：本脚本是直连 MySQL 的，没有 ShardingSphere 的
+    逻辑表 `message`，只能按 conv_id 在 16 张表上各删一遍。
+    """
+    doomed = sorted(set(doomed_actors))
+    orphan_members = count_orphan_members(cur, doomed)
+    candidates = _candidate_conversations(cur, doomed)
+
+    print(f"会话: 孤儿成员行 {orphan_members} 行、涉及会话 {len(candidates)} 个")
+    if not apply:
+        return orphan_members + len(candidates)
+
+    if orphan_members:
+        cur.execute(delete_orphan_members_sql(doomed), tuple(doomed))
+        print(f"  已删孤儿成员行 {cur.rowcount} 行")
+
+    # 删完孤儿成员行后重算：这一步才真正拿到「一个成员都没有的会话」
+    conv_ids = _empty_conversations(cur)
+    if not conv_ids:
+        return orphan_members
+
+    removed_messages = 0
+    placeholders = ",".join(["%s"] * len(conv_ids))
+    for table in tables:
+        cur.execute(f"DELETE FROM `{table}` WHERE conv_id IN ({placeholders})", tuple(conv_ids))
+        removed_messages += cur.rowcount
+    cur.execute(f"DELETE FROM conversation WHERE id IN ({placeholders})", tuple(conv_ids))
+    print(f"  已删无人会话 {cur.rowcount} 个（连同 {removed_messages} 条消息，"
+          f"消息表 {len(tables)} 张）")
+    return orphan_members + len(conv_ids)
+
+
+def orphan_members_condition(doomed: list[int]) -> str:
+    """孤儿成员行的 WHERE 子句：actor 已不存在，或属于本次要删的测试账号。"""
+    if not doomed:
+        return "a.id IS NULL"
+    placeholders = ",".join(["%s"] * len(doomed))
+    return f"a.id IS NULL OR cm.actor_id IN ({placeholders})"
+
+
+def delete_orphan_members_sql(doomed: list[int]) -> str:
+    return ("DELETE cm FROM conversation_member cm"
+            " LEFT JOIN actor a ON a.id = cm.actor_id"
+            f" WHERE {orphan_members_condition(doomed)}")
+
+
+def count_orphan_members(cur, doomed: list[int]) -> int:
+    cur.execute("SELECT COUNT(*) FROM conversation_member cm"
+                " LEFT JOIN actor a ON a.id = cm.actor_id"
+                f" WHERE {orphan_members_condition(doomed)}", tuple(doomed))
+    return cur.fetchone()[0]
+
+
+def _candidate_conversations(cur, doomed: list[int]) -> list[int]:
+    """本次会被当作孤儿处理的会话 id：
+
+    * 含「actor 已不存在」的成员行的会话；
+    * 以及一个成员行都没有的会话（建到一半、或上面那类行已先被删掉）。
+    """
+    cur.execute("SELECT DISTINCT cm.conv_id FROM conversation_member cm"
+                " LEFT JOIN actor a ON a.id = cm.actor_id"
+                f" WHERE {orphan_members_condition(doomed)}", tuple(doomed))
+    return sorted({row[0] for row in cur.fetchall()} | set(_empty_conversations(cur)))
+
+
+def _empty_conversations(cur) -> list[int]:
+    """没有任何成员行的会话 id。返回列表而不是计数：删消息时需要这些 id。"""
+    cur.execute("SELECT c.id FROM conversation c"
+                " LEFT JOIN conversation_member cm ON cm.conv_id = c.id"
+                " WHERE cm.conv_id IS NULL")
+    return [row[0] for row in cur.fetchall()]
 
 
 def main() -> int:
@@ -210,7 +303,11 @@ def main() -> int:
                 total += n
             print(f"合计 {total} 行")
 
-            total += clean_accounts(cur, args.apply)
+            doomed_actors = clean_accounts(cur, args.apply)
+            total += len(doomed_actors)
+            # 会话清理排在账号之后：它的判据（成员行指向已/将不存在的 actor）
+            # 正是「账号刚被删掉」的产物。
+            total += clean_conversations(cur, tables, args.apply, doomed_actors)
     finally:
         conn.close()
 

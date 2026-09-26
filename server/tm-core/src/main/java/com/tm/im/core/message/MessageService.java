@@ -75,6 +75,18 @@ public class MessageService implements MessageCommandPort {
      */
     private static final int MAX_SEQ_RETRIES = 3;
 
+    /**
+     * {@code client_msg_id} 的长度上限，与 {@code message.client_msg_id VARCHAR(64)} 一致。
+     *
+     * <p>为什么要在应用层判而不能交给数据库：更长的值在严格模式下会让 INSERT 直接报错
+     * （一个 5xxxx，看起来像服务端故障），而在非严格模式下会被<b>静默截断</b>——
+     * 那就更糟了：两个不同的客户端消息 id 截断成同一个，于是后一条会被当成「幂等重放」
+     * 而根本不会落库，客户端却收到一个成功的回执。
+     *
+     * <p>两条链路（REST 与长连接）共用这一道判断，所以它必须在这里而不是在控制器里。
+     */
+    private static final int MAX_CLIENT_MSG_ID_LENGTH = 64;
+
     private static final ObjectMapper JSON = com.tm.im.common.json.Json.mapper();
 
     private final ConversationRepository conversations;
@@ -101,13 +113,22 @@ public class MessageService implements MessageCommandPort {
         this.databaseZone = databaseZone;
     }
 
-    /** 发送请求。{@code clientMsgId} 为空表示放弃幂等（协议允许，但不推荐）。 */
+    /**
+     * 发送请求。
+     *
+     * @param clientMsgId 幂等键；为空表示放弃幂等（协议允许，但不推荐）
+     * @param fromClient  <b>不可信来源</b>标记：true = 来自客户端（长连接帧 / REST 请求），
+     *                    false = 服务端内部产生（如建群的系统消息）。
+     *                    它存在的唯一理由是：有些动作只有服务端能做，
+     *                    而这个判断必须有<b>唯一一处</b>——长连接与 REST 都不该自己拦一道。
+     */
     public record SendCommand(long convId,
                               long senderId,
                               String clientMsgId,
                               MessageType msgType,
                               String contentJson,
-                              long replyTo) {
+                              long replyTo,
+                              boolean fromClient) {
     }
 
     /**
@@ -325,8 +346,25 @@ public class MessageService implements MessageCommandPort {
         if (cmd.msgType() == null) {
             throw new TmException(ErrorCode.INVALID_MSG_TYPE, "msg_type 缺失");
         }
+        if (cmd.fromClient() && cmd.msgType() == MessageType.SYSTEM) {
+            // SYSTEM 消息豁免好友校验（见 checkSendPermission），因此它必须<b>只</b>
+            // 由服务端产生：否则「非好友不能给单聊发消息」这条硬规则（DESIGN §11.6）
+            // 就有了一个客户端可用的绕道——往单聊里塞一条自己也看不懂的系统通知。
+            //
+            // 拦截放在这里而不是 REST 控制器或 Netty handler 里：两条链路各拦一道
+            // 就迟早会有一道漏（而漏的那个方向恰好是攻击者选的那个）。
+            // 放在 validate 里而不是 checkSendPermission 里：后者要先查成员身份，
+            // 而这个请求连「谁在发」都不必知道就该被拒。
+            throw new TmException(ErrorCode.PERMISSION_DENIED,
+                    "SYSTEM 消息只能由服务端产生，客户端不得发送 actorId=" + cmd.senderId());
+        }
         if (cmd.contentJson() == null || cmd.contentJson().isBlank()) {
             throw new TmException(ErrorCode.MISSING_PARAMETER, "content 不能为空");
+        }
+        if (cmd.clientMsgId() != null && cmd.clientMsgId().length() > MAX_CLIENT_MSG_ID_LENGTH) {
+            throw new TmException(ErrorCode.INVALID_PARAMETER,
+                    "client_msg_id 长度 " + cmd.clientMsgId().length()
+                            + " 超过上限 " + MAX_CLIENT_MSG_ID_LENGTH);
         }
 
         JsonNode content;

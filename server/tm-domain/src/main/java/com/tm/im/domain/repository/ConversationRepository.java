@@ -25,8 +25,32 @@ public interface ConversationRepository {
 
     Conversation insert(Conversation conversation);
 
-    /** 新增成员。已存在时返回 false（幂等，可安全重试）。 */
-    boolean addMember(long convId, long actorId, com.tm.im.domain.enums.MemberRole role);
+    /**
+     * 原子建群：会话行与全部成员行在<b>同一个事务</b>里提交。
+     *
+     * <p>为什么不复用 {@link #insert} + {@link #addMember} 逐个写：那是 N+1 个事务，
+     * 中途崩溃会留下一个「成员不全的群」——而客户端重试会再建一个新的
+     * （§4.2 的建群没有幂等键），于是用户看到两个残缺的群，且没有任何一处报错。
+     * 成员数上限（几百）由调用方在进入这里之前判掉，所以本方法不做数量校验：
+     * 一个「写一半失败」的语义比一个「上限校验」难处理得多。
+     *
+     * @param conversation 会话行，{@code id} 必须已由调用方生成（Snowflake，非自增）
+     * @param members      成员行，{@code convId} 由本方法回填；{@code joinedAt} 必须由调用方给出
+     */
+    void createGroup(Conversation conversation, List<ConversationMember> members);
+
+    /**
+     * 新增成员。已存在时返回 false（幂等，可安全重试）。
+     *
+     * <p>{@code joinedAt} 由调用方传入而不是在实现里 {@code now()}：库里存的是
+     * <b>不带时区</b>的墙上时间，它的含义由 {@code tm.time.zone} 定义，
+     * 而仓储层看不到那个 Bean（存储模块不依赖核心模块的装配）。
+     * 让实现自己取 {@code LocalDateTime.now()} 等于悄悄改用 JVM 默认时区，
+     * 在 TZ=UTC 的容器里就会与消息的 {@code created_at} 差 8 小时——
+     * 而「差 8 小时」在跨时区部署里表现为「某人总是提前 8 小时发言」。
+     */
+    boolean addMember(long convId, long actorId, com.tm.im.domain.enums.MemberRole role,
+                      java.time.LocalDateTime joinedAt);
 
     /** 幂等：重复调用与调用一次等价。 */
     void updateLastReadSeq(long convId, long actorId, long lastReadSeq);
@@ -35,10 +59,35 @@ public interface ConversationRepository {
 
     boolean isMember(long convId, long actorId);
 
-    /** 拉某人的会话列表（按最近活跃排序由实现决定）。 */
-    List<Conversation> listByActor(long actorId, int limit);
+    /**
+     * 拉某人的全部会话成员关系（会话行 + 我在其中的关系行），供「我的会话列表」使用。
+     *
+     * <p><b>刻意不在这里排序</b>：文档要求按「最近活跃」排，而活跃时间在消息表里
+     * （{@code conversation} 没有 {@code updated_at} 列），只有调用方拿到消息才能算。
+     * 这里返回的顺序是无意义的，调用方必须自己排——把「大致有序」交给实现
+     * 会让一个漏排序的调用方得到一个「看起来对、偶尔错」的列表。
+     *
+     * <p><b>也不在 SQL 里加 LIMIT</b>（{@code maxScan} 只是给调用方的保险丝，
+     * 见其参数的说明）：排在后面的会话可能是「一年没说话但今天刚活跃」的那个，
+     * 用 LIMIT 截断会让它静默地从列表里消失，而用户会以为消息丢了。
+     *
+     * @param maxScan 最多返回多少行；{@code <= 0} 表示不限（正常取值）
+     */
+    List<ConversationMembership> listMemberships(long actorId, int maxScan);
 
     List<Long> listMemberIds(long convId, int limit);
+
+    /**
+     * 会话成员行（含角色、加入时间、未读游标），按加入时间升序，用于会话详情。
+     *
+     * <p>与 {@link #listMemberIds} 的区别是「要展示信息」还是「只要 ID」：
+     * 前者要带上 {@code role}/{@code joined_at} 才能渲染成员列表，
+     * 后者只服务于扇出与好友校验这类只要 ID 的路径。
+     */
+    List<ConversationMember> listMembers(long convId, int limit);
+
+    /** 成员数。建群上限校验与「群里有几个人」的展示都要用。 */
+    long countMembers(long convId);
 
     /**
      * 分配会话内下一个序号：同会话内<b>不重复、严格递增</b>。

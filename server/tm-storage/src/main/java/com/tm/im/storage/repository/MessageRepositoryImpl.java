@@ -92,12 +92,37 @@ public class MessageRepositoryImpl implements MessageRepository {
     }
 
     @Override
-    public long maxSeq(long convId) {
-        Message last = mapper.selectOne(Wrappers.<Message>lambdaQuery()
+    public List<Message> listBeforeSeq(long convId, long beforeSeq, int limit) {
+        var query = Wrappers.<Message>lambdaQuery().eq(Message::getConvId, convId);
+        // 条件必须在 .last() 之前追加：MyBatis-Plus 按调用顺序拼 SQL 片段，
+        // .last("LIMIT n") 之后再 .lt(...) 会拼出 "... LIMIT 10 AND seq < 5"，
+        // 而这条 SQL 在 MySQL 里是语法错，在别的库里可能是「条件被忽略」。
+        if (beforeSeq > 0) {
+            query.lt(Message::getSeq, beforeSeq);
+        }
+        return mapper.selectList(query
+                .orderByDesc(Message::getSeq)
+                .last("LIMIT " + Math.max(1, limit)));
+    }
+
+    /**
+     * 最新一条。
+     *
+     * <p>与 {@link #maxSeq} 是同一次查询（后者改为直接复用本方法）：
+     * 主键就是 {@code (conv_id, seq)}，所以「最大的 seq」与「那一行」
+     * 本来就一起拿到，分成两次查询只会多一趟往返并多一个不一致窗口。
+     */
+    @Override
+    public Optional<Message> findLatest(long convId) {
+        return Optional.ofNullable(mapper.selectOne(Wrappers.<Message>lambdaQuery()
                 .eq(Message::getConvId, convId)
                 .orderByDesc(Message::getSeq)
-                .last("LIMIT 1"));
-        return last == null || last.getSeq() == null ? 0L : last.getSeq();
+                .last("LIMIT 1")));
+    }
+
+    @Override
+    public long maxSeq(long convId) {
+        return findLatest(convId).map(Message::getSeq).orElse(0L);
     }
 
     @Override

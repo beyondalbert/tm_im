@@ -4,6 +4,7 @@ import com.baomidou.mybatisplus.core.toolkit.Wrappers;
 import com.tm.im.domain.entity.Conversation;
 import com.tm.im.domain.entity.ConversationMember;
 import com.tm.im.domain.enums.MemberRole;
+import com.tm.im.domain.repository.ConversationMembership;
 import com.tm.im.domain.repository.ConversationRepository;
 import com.tm.im.storage.mapper.ConversationMapper;
 import com.tm.im.storage.mapper.ConversationMemberMapper;
@@ -18,7 +19,10 @@ import org.springframework.stereotype.Repository;
 import org.springframework.transaction.annotation.Transactional;
 
 import java.time.LocalDateTime;
+import java.util.ArrayList;
+import java.util.HashMap;
 import java.util.List;
+import java.util.Map;
 import java.util.Optional;
 
 @Repository
@@ -113,6 +117,11 @@ public class ConversationRepositoryImpl implements ConversationRepository {
     @Transactional
     public Conversation insert(Conversation conversation) {
         if (conversation.getCreatedAt() == null) {
+            // 仅留给手工构造实体（测试、一次性脚本）的兜底。注意它用的是 JVM 默认时区，
+            // 与库里其他时间列的口径（tm.time.zone）可能不同——生产路径必须由调用方
+            // 显式给出 created_at（见 ConversationRepository#createGroup 的注释）。
+            log.warn("会话 created_at 缺失，回退到 JVM 默认时区取值 convId={}，"
+                    + "容器里（TZ=UTC）这会与 tm.time.zone 的口径不一致", conversation.getId());
             conversation.setCreatedAt(LocalDateTime.now());
         }
         conversationMapper.insert(conversation);
@@ -121,14 +130,14 @@ public class ConversationRepositoryImpl implements ConversationRepository {
 
     @Override
     @Transactional
-    public boolean addMember(long convId, long actorId, MemberRole role) {
+    public boolean addMember(long convId, long actorId, MemberRole role, LocalDateTime joinedAt) {
         ConversationMember member = new ConversationMember();
         member.setConvId(convId);
         member.setActorId(actorId);
         member.setRole(role);
         member.setLastReadSeq(0L);
         member.setMuted(false);
-        member.setJoinedAt(LocalDateTime.now());
+        member.setJoinedAt(joinedAt == null ? LocalDateTime.now() : joinedAt);
         try {
             memberMapper.insert(member);
             return true;
@@ -136,6 +145,46 @@ public class ConversationRepositoryImpl implements ConversationRepository {
             // 已存在 → 幂等返回 false，让调用方可以安全重试「进群」操作
             return false;
         }
+    }
+
+    /**
+     * 原子建群。
+     *
+     * <p>加入时间<b>不由本方法取</b>：调用方给什么就是什么（见接口注释里的时区理由）。
+     * 这里对 null 直接抛而不是 {@code now()} 兜底——“不知道这个时间属于哪个时区”
+     * 是一个应当当场暴露的调用错误，而不是一个可以猜一个值混过去的默认值。
+     */
+    @Override
+    @Transactional
+    public void createGroup(Conversation conversation, List<ConversationMember> members) {
+        if (conversation.getId() == null || conversation.getId() <= 0) {
+            throw new IllegalArgumentException("建群需要调用方先生成会话 id（雪花号）");
+        }
+        if (conversation.getCreatedAt() == null) {
+            throw new IllegalArgumentException("建群需要调用方给出 created_at（带明确时区口径）");
+        }
+        List<ConversationMember> rows = members == null ? List.of() : members;
+        for (ConversationMember member : rows) {
+            if (member.getJoinedAt() == null) {
+                throw new IllegalArgumentException(
+                        "成员行缺少 joined_at: actorId=" + member.getActorId());
+            }
+        }
+        conversationMapper.insert(conversation);
+        for (ConversationMember member : rows) {
+            member.setConvId(conversation.getId());
+            if (member.getRole() == null) {
+                member.setRole(MemberRole.MEMBER);
+            }
+            if (member.getLastReadSeq() == null) {
+                member.setLastReadSeq(0L);
+            }
+            if (member.getMuted() == null) {
+                member.setMuted(false);
+            }
+            memberMapper.insert(member);
+        }
+        log.debug("建群完成 convId={} 成员={} 人", conversation.getId(), rows.size());
     }
 
     @Override
@@ -164,24 +213,71 @@ public class ConversationRepositoryImpl implements ConversationRepository {
                 .eq(ConversationMember::getActorId, actorId));
     }
 
+    /**
+     * 拉某人的全部会话成员关系：两次查询（成员行 + 会话行），而不是每个会话各一次。
+     *
+     * <p>第二次查询用 {@code id IN (...)} 批量拉会话行：{@code conversation} 是
+     * <b>单表</b>（分片表只有 {@code message}），所以这条 IN 是普通索引查找，
+     * 不会像分片表那样按分片键扇出。
+     *
+     * <p>成员行存在但会话行缺失（「删会话没删成员」或手改过库）时<b>记 ERROR 并跳过</b>：
+     * 静默返回一个 id 指向不存在会话的条目，会让客户端在每个用到该会话的地方
+     * 各报一次错；直接跳过则至少让列表其余部分可用，而 ERROR 日志留下了证据。
+     */
     @Override
-    public List<Conversation> listByActor(long actorId, int limit) {
-        List<ConversationMember> memberships = memberMapper.selectList(
-                Wrappers.<ConversationMember>lambdaQuery()
-                        .eq(ConversationMember::getActorId, actorId)
-                        .orderByDesc(ConversationMember::getJoinedAt)
-                        .last("LIMIT " + Math.max(1, limit)));
-        if (memberships.isEmpty()) {
+    public List<ConversationMembership> listMemberships(long actorId, int maxScan) {
+        var query = Wrappers.<ConversationMember>lambdaQuery()
+                .eq(ConversationMember::getActorId, actorId);
+        if (maxScan > 0) {
+            query.last("LIMIT " + maxScan);
+        }
+        List<ConversationMember> rows = memberMapper.selectList(query);
+        if (rows.isEmpty()) {
             return List.of();
         }
-        List<Long> convIds = memberships.stream().map(ConversationMember::getConvId).toList();
-        return conversationMapper.selectBatchIds(convIds);
+        List<Long> convIds = rows.stream().map(ConversationMember::getConvId).distinct().toList();
+        Map<Long, Conversation> byId = new HashMap<>();
+        for (Conversation c : conversationMapper.selectBatchIds(convIds)) {
+            byId.put(c.getId(), c);
+        }
+        List<ConversationMembership> out = new ArrayList<>(rows.size());
+        for (ConversationMember row : rows) {
+            Conversation conv = byId.get(row.getConvId());
+            if (conv == null) {
+                log.error("成员关系指向不存在的会话 convId={} actorId={} —— 数据不一致",
+                        row.getConvId(), actorId);
+                continue;
+            }
+            out.add(new ConversationMembership(conv, row));
+        }
+        return out;
+    }
+
+    @Override
+    public List<ConversationMember> listMembers(long convId, int limit) {
+        return memberMapper.selectList(Wrappers.<ConversationMember>lambdaQuery()
+                .eq(ConversationMember::getConvId, convId)
+                // 显式排序：不加 ORDER BY 时 InnoDB 恰好按主键 (conv_id, actor_id) 返回，
+                // 于是「成员列表的顺序」变成了一个实现细节，换索引/换版本就会变。
+                .orderByAsc(ConversationMember::getJoinedAt)
+                .orderByAsc(ConversationMember::getActorId)
+                .last("LIMIT " + Math.max(1, limit)));
+    }
+
+    @Override
+    public long countMembers(long convId) {
+        return memberMapper.selectCount(Wrappers.<ConversationMember>lambdaQuery()
+                .eq(ConversationMember::getConvId, convId));
     }
 
     @Override
     public List<Long> listMemberIds(long convId, int limit) {
         return memberMapper.selectList(Wrappers.<ConversationMember>lambdaQuery()
                         .eq(ConversationMember::getConvId, convId)
+                        // 显式排序：扇出顺序、以及「单聊里谁是对方」都读这个列表，
+                        // 不排序时顺序由存储引擎决定，会让「两名成员里取非自己的那个」
+                        // 在多成员异常数据上每次返回不同的人。
+                        .orderByAsc(ConversationMember::getActorId)
                         .last("LIMIT " + Math.max(1, limit)))
                 .stream().map(ConversationMember::getActorId).toList();
     }
