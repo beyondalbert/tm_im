@@ -12,6 +12,7 @@ import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Objects;
 import java.util.Optional;
 
 /** 内存版会话仓储。语义与 {@code ConversationRepositoryImpl} 对齐（幂等、原子建群、只前进的已读游标）。 */
@@ -23,6 +24,9 @@ class InMemoryConversations implements ConversationRepository {
 
     /** 下一次 insert 抛唯一键冲突（模拟「两个请求同时建同一个单聊」）。 */
     boolean failNextInsertWithDuplicatePairKey;
+
+    /** 下一次转让群主返回 false（模拟「检查通过之后、写入之前，另一个请求已经把群主转走了」）。 */
+    boolean failNextTransferOwnership;
     long seqCounter;
 
     void put(Conversation conversation) {
@@ -116,6 +120,66 @@ class InMemoryConversations implements ConversationRepository {
         if (member != null && member.getLastReadSeq() != null && member.getLastReadSeq() < lastReadSeq) {
             member.setLastReadSeq(lastReadSeq);
         }
+    }
+
+    @Override
+    public boolean removeMember(long convId, long actorId) {
+        calls.add("removeMember:" + convId + ":" + actorId);
+        return members.getOrDefault(convId, new ArrayList<>())
+                .removeIf(m -> m.getActorId() == actorId);
+    }
+
+    @Override
+    public boolean updateMemberRole(long convId, long actorId, MemberRole role) {
+        calls.add("updateMemberRole:" + convId + ":" + actorId + ":" + role.code());
+        ConversationMember member = member(convId, actorId);
+        if (member == null) {
+            return false;
+        }
+        member.setRole(role);
+        return true;
+    }
+
+    /**
+     * 真实的实现靠 {@code @Transactional} 保证三行一起改；内存版把它们写成相邻的三行。
+     *
+     * <p>单测能验的是「调用方拿到的返回值和会话行是什么」，验不了回滚
+     * （那是 {@code ConversationReadPathIT} 在真库上的事）。
+     */
+    @Override
+    public boolean transferOwnership(long convId, long fromActorId, long toActorId) {
+        calls.add("transferOwnership:" + convId + ":" + fromActorId + "->" + toActorId);
+        if (failNextTransferOwnership) {
+            failNextTransferOwnership = false;
+            return false;
+        }
+        ConversationMember from = member(convId, fromActorId);
+        if (from == null || from.getRole() != MemberRole.OWNER) {
+            return false;
+        }
+        ConversationMember to = member(convId, toActorId);
+        if (to == null) {
+            throw new IllegalStateException("转让群主：目标成员行不存在 actorId=" + toActorId);
+        }
+        from.setRole(MemberRole.ADMIN);
+        to.setRole(MemberRole.OWNER);
+        Conversation conversation = conversations.get(convId);
+        if (conversation == null || !Objects.equals(conversation.getOwnerActor(), fromActorId)) {
+            throw new IllegalStateException("转让群主：conversation.owner_actor 不是 " + fromActorId);
+        }
+        conversation.setOwnerActor(toActorId);
+        return true;
+    }
+
+    @Override
+    public boolean updateTitle(long convId, String title) {
+        calls.add("updateTitle:" + convId);
+        Conversation conversation = conversations.get(convId);
+        if (conversation == null) {
+            return false;
+        }
+        conversation.setTitle(title);
+        return true;
     }
 
     @Override

@@ -654,6 +654,28 @@ class MessageServiceTest {
         public long countMembers(long convId) {
             return members.getOrDefault(convId, List.of()).size();
         }
+
+        // ---- 群成员管理（§4.9）：本测试只关心发消息的规则，这些一律不走 ----
+
+        @Override
+        public boolean removeMember(long convId, long actorId) {
+            throw new UnsupportedOperationException("本测试不走成员管理路径");
+        }
+
+        @Override
+        public boolean updateMemberRole(long convId, long actorId, MemberRole role) {
+            throw new UnsupportedOperationException("本测试不走成员管理路径");
+        }
+
+        @Override
+        public boolean transferOwnership(long convId, long fromActorId, long toActorId) {
+            throw new UnsupportedOperationException("本测试不走成员管理路径");
+        }
+
+        @Override
+        public boolean updateTitle(long convId, String title) {
+            throw new UnsupportedOperationException("本测试不走成员管理路径");
+        }
     }
 
     private static final class FakeMessages implements MessageRepository {

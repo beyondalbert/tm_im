@@ -86,9 +86,10 @@
 | 40902 | request pending | 已有待处理请求 | ❌ | 等待对方处理 |
 | 40903 | blocked | 对方拒绝你的请求 | ❌ | 无法添加 |
 | 40904 | self operation | 不能对自己操作 | ❌ | 检查 target |
-| 40905 | already member | 已是群成员 | ❌ | — |
+| 40905 | already member | 已是群成员 | ❌ | —（§4.9 的加人是幂等的，不会返回它） |
 | 40906 | group member limit | 群成员数超限 | ❌ | 上限 500 |
 | 40907 | already liked | 已点过赞 | ❌ | 幂等，忽略 |
+| 40908 | target not a member | 目标不在群里 | ❌ | 刷新成员列表（多为过期视图，不是错误） |
 
 ### 2.4 限流（42900-42999）
 

@@ -30,10 +30,13 @@ import java.util.ArrayList;
 import java.util.Collection;
 import java.util.Comparator;
 import java.util.HashMap;
+import java.util.HashSet;
+import java.util.LinkedHashMap;
 import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
+import java.util.Set;
 
 /**
  * 会话与消息的查询/创建 —— 03-rest-api.md §4.1–§4.8 的实现。
@@ -465,6 +468,339 @@ public class ConversationService {
                 .orElse(0L);
         long lastSeq = messages.maxSeq(convId);
         return new ReadOutcome(convId, effective, Math.max(0, lastSeq - effective));
+    }
+
+    // ================================================================== 群成员管理（§4.9）
+
+    /*
+     * 权限矩阵（03-rest-api.md §4.9 的代码侧）：
+     *
+     *   操作         | 谁能做              | 不能时的码
+     *   -------------|---------------------|----------------------------
+     *   加人         | ADMIN / OWNER       | 40303（非成员）/ 40305（MEMBER）
+     *   踢人         | OWNER 任意；ADMIN 只能踢比自己低的（MEMBER） | 40305
+     *   退群         | 任何人（OWNER 除外）| 40303 / 40306
+     *   改群名       | ADMIN / OWNER       | 40305
+     *   改角色/转让  | 仅 OWNER            | 40305
+     *
+     * 这套规则里有三个必须钉住的取舍（写下来是因为它们都是「加上去容易、改掉很难」那一类）：
+     *
+     * ① **只有 OWNER 能给别人改角色**。若 ADMIN 也能，那么「OWNER 指定的管理员」会被
+     *    另一个管理员撤掉——OWNER 的选择就不再是最终的，角色这个字段也就不再有意义。
+     *    另外这也顺手消掉了一个活锁：两个 ADMIN 互相降级，任何一方都无法把状态推到稳定。
+     *
+     * ② **「比自己的角色高」是唯一的判断式**（{@link MemberRole} 的码值是「越小越有权」）。
+     *    OWNER=1 于是「没人能踢 OWNER」不需要单独写一条规则——没有任何角色码小于 1。
+     *    同一个式子也给出了「两个 ADMIN 互相踢不动」，不需要额外枚举特殊情况。
+     *
+     * ③ **转让把旧群主降为 ADMIN，而不是 MEMBER**。「转让」交出去的只是身份，
+     *    转让者并没有说自己从此不管这个群；而「降为 MEMBER」是一个**独立**的动作
+     *    （新群主可以立刻做）。合并在一次调用里的代价是：旧群主想反悔时发现自己
+     *    连踢人的权限都没了，而那个人（群里唯一的 OWNER）可能是刚被拉进来的。
+     */
+
+    /** 加人（§4.9）。{@code alreadyMembers} 是「本来就在群里、被跳过」的那批人。 */
+    public record AddOutcome(long convId,
+                             List<ConversationMemberInfo> added,
+                             List<Long> alreadyMembers,
+                             long memberCount) {
+    }
+
+    /** 踢人与退群的共同结果：都是「这个会话里少了一个人」。 */
+    public record RemoveOutcome(long convId, long actorId, long memberCount) {
+    }
+
+    /** 改角色／转让群主的结果。{@code ownerActor} 是<b>生效后</b>的群主。 */
+    public record RoleOutcome(long convId, long actorId, MemberRole role, long ownerActor,
+                              long memberCount) {
+    }
+
+    /** 改群名的结果。 */
+    public record TitleOutcome(long convId, String title) {
+    }
+
+    /**
+     * 加人（§4.9 的 {@code POST /v1/conversations/{{conv_id}}/members}）。
+     *
+     * <p><b>「已经在群里」不报错</b>（因此永远不会返回 40905）：这个接口收的是一批人，
+     * 其中几个已在群里不该让另外几个也加不进去；而「一个都没加进去」也不是失败
+     * （重复调用与调用一次等价）。被跳过的人从 {@code already_members} 里回给客户端，
+     * 它据此刷新成员列表即可。
+     *
+     * <p><b>不要求与邀请人是好友</b>（DESIGN §11.6）：建群都不要求成员互为好友，
+     * 后续加人却要求的话，换来的只是「想拉个人得先加好友，而加好友又要先找到这个人」。
+     */
+    public AddOutcome addMembers(long actorId, long convId, List<String> memberRefs) {
+        GroupContext ctx = requireGroup(convId, actorId);
+        requireAdminOrOwner(ctx, "加人");
+
+        List<String> refs = memberRefs == null ? List.of() : memberRefs;
+        if (refs.isEmpty()) {
+            throw new TmException(ErrorCode.MISSING_PARAMETER, "members 不能为空");
+        }
+        int maxMembers = properties.getMaxGroupMembers();
+        List<Long> current = conversations.listMemberIds(convId, maxMembers + 1);
+        if (refs.size() > maxMembers) {
+            // 粗筛，但必须是<b>真的上界</b>：一次加的人比单群上限还多，无论其中多少已经在群里
+            // 都不可能成立，所以这一步可以先行（它省掉的是「为一万个 handle 逐个打库」）。
+            // 不能拿 `current.size() + refs.size()` 当判据：这里允许重复（已在群里的人会被跳过），
+            // 于是一个「一个新人 + 一个已在群里的人」的请求会在满员群里被误拒——而那是客户端的
+            // 成员列表过期，不是它要加太多人。真实人数只能在解析、去重之后算（见下面那一次）。
+            throw new TmException(ErrorCode.GROUP_MEMBER_LIMIT,
+                    "一次加入 " + refs.size() + " 人超过单群上限 " + maxMembers);
+        }
+
+        // 解析（可能 40002 / 40004 / 40401）全部前置：一行都不写之前完成。
+        // 理由与建群同一个：开始写之后才失败，会留下「加进去一半」的群，而客户端会重试。
+        LinkedHashSet<Long> ids = new LinkedHashSet<>();
+        for (String ref : refs) {
+            ids.add(actorLookup.require(ref).getId());
+        }
+
+        Set<Long> members = new HashSet<>(current);
+        List<Long> toAdd = new ArrayList<>();
+        List<Long> already = new ArrayList<>();
+        for (Long id : ids) {
+            if (members.contains(id)) {
+                already.add(id);
+            } else {
+                toAdd.add(id);
+            }
+        }
+        if (current.size() + toAdd.size() > maxMembers) {
+            // 真实的检查：解析与去重之后，真正会新增几个人才是确定的
+            throw new TmException(ErrorCode.GROUP_MEMBER_LIMIT,
+                    "加入 " + toAdd.size() + " 人后成员数将达 "
+                            + (current.size() + toAdd.size()) + "，超过单群上限 " + maxMembers);
+        }
+
+        LocalDateTime now = LocalDateTime.now(databaseZone);
+        for (long id : toAdd) {
+            conversations.addMember(convId, id, MemberRole.MEMBER, now);
+        }
+
+        Map<Long, Actor> byId = loadActors(toAdd);
+        List<ConversationMemberInfo> added = new ArrayList<>(toAdd.size());
+        for (long id : toAdd) {
+            added.add(new ConversationMemberInfo(memberRow(convId, id, MemberRole.MEMBER, now), byId.get(id)));
+            // 通知在写入之后：新成员这时才在成员表里，扇出才会把它算进去
+            // （他自己的客户端也才能收到「X 邀请你加入群聊」）。
+            announce(convId, actorId, "member_joined", byId.get(id), Map.of());
+        }
+        return new AddOutcome(convId, List.copyOf(added), List.copyOf(already),
+                conversations.countMembers(convId));
+    }
+
+    /**
+     * 踢人（§4.9 的 {@code DELETE /v1/conversations/{{conv_id}}/members/{{actor_id}}}）。
+     *
+     * <p><b>目标不在群里回 40908 而不是「成功」</b>：重复的「移出」看起来像幂等，
+     * 但这里刻意不这么做——一个拼错的 actor_id 会静默地「成功移除」，而客户端以为自己
+     * 刚刚踢掉了一个人。40908 的客户端动作是「刷新成员列表」，并发踢同一人时后到的那个
+     * 拿到的正是它，两边都是同一个处理。
+     */
+    public RemoveOutcome removeMember(long actorId, long convId, long targetId) {
+        GroupContext ctx = requireGroup(convId, actorId);
+        if (targetId == actorId) {
+            throw new TmException(ErrorCode.SELF_OPERATION,
+                    "不能踢自己：退群用 DELETE /v1/conversations/" + convId + "/members/me");
+        }
+        ConversationMember target = conversations.findMember(convId, targetId)
+                .orElseThrow(() -> new TmException(ErrorCode.TARGET_NOT_MEMBER,
+                        "actorId=" + targetId + " 不是 convId=" + convId + " 的成员"));
+        requireCanActOn(ctx, target, "踢人");
+
+        conversations.removeMember(convId, targetId);
+        announce(convId, actorId, "member_removed", loadActors(List.of(targetId)).get(targetId), Map.of());
+        return new RemoveOutcome(convId, targetId, conversations.countMembers(convId));
+    }
+
+    /**
+     * 退群（§4.9 的 {@code DELETE /v1/conversations/{{conv_id}}/members/me}）。
+     *
+     * <p><b>通知先写、成员行后删</b>——与其余几个接口相反，理由是硬的：
+     * {@code MessageService} 要求 SYSTEM 消息的作者是会话成员（否则「客户端伪造系统消息」
+     * 那条防护就没了），而我一旦退群就不再是成员，那条消息就再也写不进去。
+     * 代价是「通知已写、删除失败」时历史里会多一句「X 退出了群聊」，而成员行还在——
+     * 这种情形只会出现在数据库报错时，且重试就能收敛。反过来（先删后写）的代价是
+     * 那条通知<b>永远丢失</b>，因为重试仍然是先删。
+     */
+    public RemoveOutcome leaveGroup(long actorId, long convId) {
+        GroupContext ctx = requireGroup(convId, actorId);
+        if (ctx.me().getRole() == MemberRole.OWNER) {
+            throw new TmException(ErrorCode.OWNER_CANNOT_LEAVE,
+                    "群主不能直接退群：先 PATCH /v1/conversations/" + convId
+                            + "/members/{actor_id} {\"role\":1} 把群主转让出去");
+        }
+        announce(convId, actorId, "member_left", loadActors(List.of(actorId)).get(actorId), Map.of());
+        conversations.removeMember(convId, actorId);
+        return new RemoveOutcome(convId, actorId, conversations.countMembers(convId));
+    }
+
+    /**
+     * 改角色／转让群主（§4.9 的 {@code PATCH /v1/conversations/{{conv_id}}/members/{{actor_id}}}）。
+     *
+     * <p>{@code role=1} 是<b>转让群主</b>，语义是「我是群主，现在群主是 TA」——见
+     * {@link #transfer}：它是一个原子动作（新群主 upgraded、旧群主降为 ADMIN、
+     * {@code conversation.owner_actor} 重指）。{@code role=2/3} 是普通的角色设置。
+     *
+     * <p><b>同值重复上报是幂等的</b>（不写库、也不产生系统消息）：客户端按
+     * 「当前角色」回填下拉框，点一下确定往往就是同一个值。
+     */
+    public RoleOutcome changeRole(long actorId, long convId, long targetId, int roleCode) {
+        GroupContext ctx = requireGroup(convId, actorId);
+        requireOwner(ctx, "设置角色");
+
+        MemberRole requested = MemberRole.of(roleCode);
+        if (requested == null) {
+            throw new TmException(ErrorCode.INVALID_PARAMETER,
+                    "role 只能是 1(OWNER) / 2(ADMIN) / 3(MEMBER): " + roleCode);
+        }
+        if (targetId == actorId) {
+            // 改自己的角色 = 让群失去群主（1）或降自己的权（2/3），两者都没有定义。
+            throw new TmException(ErrorCode.SELF_OPERATION, "不能改自己的角色 actorId=" + actorId);
+        }
+        ConversationMember target = conversations.findMember(convId, targetId)
+                .orElseThrow(() -> new TmException(ErrorCode.TARGET_NOT_MEMBER,
+                        "actorId=" + targetId + " 不是 convId=" + convId + " 的成员"));
+
+        if (requested == MemberRole.OWNER) {
+            return transfer(ctx, target);
+        }
+        if (target.getRole() == requested) {
+            // 幂等：目标状态已经成立，不写库、不发通知，但仍然回当前的真实值
+            return new RoleOutcome(convId, targetId, requested,
+                    ctx.conversation().getOwnerActor(), conversations.countMembers(convId));
+        }
+        conversations.updateMemberRole(convId, targetId, requested);
+        announce(convId, actorId, "member_role_changed", loadActors(List.of(targetId)).get(targetId),
+                Map.of("role", requested.code()));
+        return new RoleOutcome(convId, targetId, requested,
+                ctx.conversation().getOwnerActor(), conversations.countMembers(convId));
+    }
+
+    /** 转让群主：见 {@link #changeRole} 与仓储方法的注释。 */
+    private RoleOutcome transfer(GroupContext ctx, ConversationMember target) {
+        long convId = ctx.conversation().getId();
+        long actorId = ctx.me().getActorId();
+        if (!conversations.transferOwnership(convId, actorId, target.getActorId())) {
+            // 仓储的条件式更新没命中：并发下另一个请求已经把群主转让出去了。
+            throw new TmException(ErrorCode.NO_PRIVILEGE,
+                    "转让失败：actorId=" + actorId + " 已经不是 convId=" + convId + " 的群主");
+        }
+        announce(convId, actorId, "owner_transferred", loadActors(List.of(target.getActorId()))
+                .get(target.getActorId()), Map.of());
+        return new RoleOutcome(convId, target.getActorId(), MemberRole.OWNER, target.getActorId(),
+                conversations.countMembers(convId));
+    }
+
+    /**
+     * 改群名（§4.9 的 {@code PATCH /v1/conversations/{{conv_id}}}）。
+     *
+     * <p>群公告没有做：{@code conversation} 表里没有那一列（见 README 里那条已知差异），
+     * 而为了一个字段改 DDL + 重新生成实体 + 迁移，属于另一件事。
+     */
+    public TitleOutcome renameGroup(long actorId, long convId, String title) {
+        GroupContext ctx = requireGroup(convId, actorId);
+        requireAdminOrOwner(ctx, "改群名");
+        String clean = requireTitle(title);
+        if (Objects.equals(clean, ctx.conversation().getTitle())) {
+            return new TitleOutcome(convId, clean);   // 幂等：没有变化就不写、也不发通知
+        }
+        conversations.updateTitle(convId, clean);
+        announce(convId, actorId, "title_changed", null, Map.of("title", clean));
+        return new TitleOutcome(convId, clean);
+    }
+
+    /**
+     * §4.9 的公共前置：<b>会话存在（40402）→ 我是成员（40303）→ 它是群聊（40302）</b>。
+     *
+     * <p>顺序沿用 {@link #requireMember}（先 40402 再 40303），只多在末尾加一条「不是群聊」：
+     * 单聊没有「群内权限」这个概念，也没有群名，所以这五个接口对单聊一律不可用。
+     * 用 40302 而不是 40002，是因为请求本身完全合法——是<b>这个资源</b>不能被这么操作，
+     * 客户端的动作也确实是「确认 conv_type」而不是「改参数」。
+     */
+    private GroupContext requireGroup(long convId, long actorId) {
+        Conversation conversation = requireConversation(convId);
+        ConversationMember me = conversations.findMember(convId, actorId)
+                .orElseThrow(() -> new TmException(ErrorCode.NOT_A_MEMBER,
+                        "convId=" + convId + ", actorId=" + actorId));
+        if (conversation.getConvType() != ConvType.GROUP) {
+            throw new TmException(ErrorCode.PERMISSION_DENIED,
+                    "convId=" + convId + " 不是群聊，没有成员管理/群名（conv_type="
+                            + (conversation.getConvType() == null ? "null" : conversation.getConvType().code()) + "）");
+        }
+        return new GroupContext(conversation, me);
+    }
+
+    private record GroupContext(Conversation conversation, ConversationMember me) {
+    }
+
+    /** 加人／改群名：ADMIN 与 OWNER 都行。 */
+    private static void requireAdminOrOwner(GroupContext ctx, String action) {
+        MemberRole role = ctx.me().getRole();
+        if (role == null || role == MemberRole.MEMBER) {
+            throw new TmException(ErrorCode.NO_PRIVILEGE,
+                    action + "需要 ADMIN 或 OWNER，当前角色=" + (role == null ? "null" : role.code()));
+        }
+    }
+
+    /** 改角色／转让群主：只有群主。理由见本节开头的取舍①。 */
+    private static void requireOwner(GroupContext ctx, String action) {
+        if (ctx.me().getRole() != MemberRole.OWNER) {
+            throw new TmException(ErrorCode.NO_PRIVILEGE,
+                    action + "只能由群主做，当前角色="
+                            + (ctx.me().getRole() == null ? "null" : ctx.me().getRole().code()));
+        }
+    }
+
+    /**
+     * 「能不能动这个人」：只有一个判断式——<b>目标的角色码严格大于我的</b>。
+     *
+     * <p>OWNER(1) 于是可以动任何人（ADMIN=2、MEMBER=3 都大于 1），ADMIN(2) 只能动 MEMBER(3)，
+     * 而「谁都不能动 OWNER」是同一个式子在这个编码下的自然推论（没有比 1 更小的角色码）。
+     */
+    private static void requireCanActOn(GroupContext ctx, ConversationMember target, String action) {
+        MemberRole mine = ctx.me().getRole();
+        MemberRole theirs = target.getRole();
+        if (mine == null || theirs == null || theirs.code() <= mine.code()) {
+            throw new TmException(ErrorCode.NO_PRIVILEGE,
+                    action + "需要比目标更高的角色：我是 " + (mine == null ? "null" : mine.code())
+                            + "，目标是 " + (theirs == null ? "null" : theirs.code())
+                            + "（群主只能通过转让换人，不能被移除）");
+        }
+    }
+
+    /**
+     * 写一条成员管理产生的 SYSTEM 消息（DESIGN §11.2）。
+     *
+     * <p><b>失败不抛异常</b>，与 {@link #announceGroupCreated} 同一条取舍：这条消息是通知，
+     * 不是事实——数据已经改了。让通知的失败回滚业务操作，会让用户看到「踢人失败」
+     * 而那个人其实已经被踢掉了（刷新一下才发现），比丢一条通知难排查得多。
+     *
+     * <p><b>{@code content} 里带上 handle / display_name</b>：退群、被移出的人已经不在
+     * 成员表里了，而客户端渲染「carol 退出了群聊」时要的正是这个名字——它只能从此处取。
+     * 名字是<b>当时</b>的快照，与消息本身一样是历史事实。
+     *
+     * @param subject 事件当事人；改群名没有当事人，传 null
+     */
+    private void announce(long convId, long operatorId, String action, Actor subject,
+                          Map<String, ?> extra) {
+        Map<String, Object> content = new LinkedHashMap<>();
+        content.put("action", action);
+        if (subject != null) {
+            content.put("actor_id", subject.getId());
+            content.put("handle", subject.getHandle());
+            content.put("display_name", subject.getDisplayName());
+        }
+        content.putAll(extra);
+        try {
+            messageCommands.send(new MessageService.SendCommand(
+                    convId, operatorId, null, MessageType.SYSTEM, Json.write(content), 0, false));
+        } catch (RuntimeException e) {
+            log.error("成员管理产生的系统消息写入失败 convId={} action={} operator={}"
+                    + "（操作已生效，消息只是通知）", convId, action, operatorId, e);
+        }
     }
 
     // ================================================================== 内部

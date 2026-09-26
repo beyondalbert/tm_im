@@ -131,6 +131,29 @@ public final class ConversationViews {
         return new ReadView(outcome.convId(), outcome.lastReadSeq(), outcome.unreadCount());
     }
 
+    // ---------------------------------------------------------------- §4.9 群成员管理
+
+    public static MemberAddView memberAdd(ConversationService.AddOutcome outcome, ZoneId databaseZone) {
+        List<MemberView> added = new ArrayList<>(outcome.added().size());
+        for (ConversationService.ConversationMemberInfo info : outcome.added()) {
+            added.add(member(info, databaseZone));
+        }
+        return new MemberAddView(outcome.convId(), added, outcome.alreadyMembers(), outcome.memberCount());
+    }
+
+    public static MemberRemovedView memberRemoved(ConversationService.RemoveOutcome outcome) {
+        return new MemberRemovedView(outcome.convId(), outcome.actorId(), outcome.memberCount());
+    }
+
+    public static MemberRoleView memberRole(ConversationService.RoleOutcome outcome) {
+        return new MemberRoleView(outcome.convId(), outcome.actorId(), outcome.role().code(),
+                outcome.ownerActor(), outcome.memberCount());
+    }
+
+    public static ConversationTitleView title(ConversationService.TitleOutcome outcome) {
+        return new ConversationTitleView(outcome.convId(), outcome.title());
+    }
+
     public static MessagePageView messagePage(ConversationService.Page<Message> page, ZoneId databaseZone) {
         return new MessagePageView(MessageViews.toViews(page.items(), databaseZone),
                 page.nextCursor(), page.hasMore());

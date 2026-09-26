@@ -5,6 +5,7 @@ import com.tm.im.common.error.TmException;
 import com.tm.im.core.message.MessageCommandPort;
 import com.tm.im.core.message.MessageService;
 import com.tm.im.domain.entity.Message;
+import com.tm.im.domain.enums.MessageType;
 
 import java.util.ArrayList;
 import java.util.List;
@@ -39,6 +40,13 @@ class RecordingMessageCommands implements MessageCommandPort {
             RuntimeException failure = nextSendFailure;
             nextSendFailure = null;
             throw failure;
+        }
+        if (cmd.msgType() == MessageType.SYSTEM && !conversations.isMember(cmd.convId(), cmd.senderId())) {
+            // 与真实 MessageService.checkSendPermission 同一条前置：SYSTEM 消息的作者也必须是成员。
+            // 少了它，「退群是先删成员行还是先写通知」就变成一个测不出来的顺序——
+            // 而先删后写会让那条通知永远丢失（真实实现只会记一条 ERROR，请求照样成功）。
+            throw new TmException(ErrorCode.NOT_A_MEMBER,
+                    "SYSTEM 消息的作者必须是会话成员: convId=" + cmd.convId());
         }
         sent.add(cmd);
         Message message = new Message();

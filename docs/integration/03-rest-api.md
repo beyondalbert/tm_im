@@ -537,8 +537,8 @@ Content-Type: application/json
   "thumb_media_id": 660000000000000002
 }
 
-// SYSTEM（通常由系统产生，客户端一般不主动发）
-{ "action": "member_joined", "actor_id": 1001 }
+// SYSTEM（由服务端产生，客户端发会被 40302 拒；取值见 §4.9 的 action 表）
+{ "action": "member_joined", "actor_id": 1001, "handle": "bob", "display_name": "Bob" }
 ```
 
 **成功响应：**
@@ -644,31 +644,187 @@ Content-Type: application/json
 
 ### 4.9 群成员管理
 
-> **状态：未实现（M4）**。下面这几个接口现在返回 `404 + 40400`（路由不存在）——
-> 它们的共同点是都要一条**群内权限**规则（谁能加人、谁能踢谁、群主转让），
-> 而那套规则必须先想清楚再写：加上去容易，改掉很难（客户端会按旧行为实现按钮）。
-> 需要它们的客户端请先只做「建群 + 聊天」，成员固定不变。
+> **只对群聊有效**（`conv_type=2`）：单聊的成员调这五个接口一律回 `40302`（请求本身完全合法，
+> 只是单聊没有「群内权限」这个概念，也没有群名）；连成员都不是则仍然是 `40303`。
+
+**权限矩阵**（角色：`1=OWNER` `2=ADMIN` `3=MEMBER`，数字越小权限越高）
+
+| 操作 | 谁能做 |
+|---|---|
+| 加人 | ADMIN 或 OWNER |
+| 改群名 | ADMIN 或 OWNER |
+| 踢人 | OWNER 可踢任何人；ADMIN 只能踢 MEMBER |
+| 改角色 / 转让群主 | **仅 OWNER** |
+| 退群 | 任何成员；OWNER 需先转让 |
+
+判据只有一条：**目标的角色码必须严格大于我的**。因为 `OWNER=1`，这条式子同时给出了
+「没人能踢群主」（没有比 1 更小的角色码）与「两个 ADMIN 互相踢不动」——不需要为它们单独写规则。
+
+三条刻意定下来的行为（改起来代价高，客户端会按旧行为实现按钮）：
+
+- **只有 OWNER 能改角色**。否则「群主指定的管理员」会被另一个管理员撤掉，
+  群主的选择就不再是最终的。
+- **转让群主把旧群主降为 ADMIN**，不是 MEMBER。转让交出去的只是身份，
+  而「降为 MEMBER」是一个独立动作（新群主可以接着做）。
+- **重复加人不是错误**（见下），所以 `40905 already member` 在这里**不会出现**。
+
+#### 加人
 
 ```http
-# 加人（需 ADMIN 或 OWNER）
-POST   /v1/conversations/{conv_id}/members          {"members":["@bob"]}
+POST /v1/conversations/1002/members
+Content-Type: application/json
 
-# 踢人
-DELETE /v1/conversations/{conv_id}/members/{actor_id}
-
-# 退出（OWNER 退出需先转让）
-DELETE /v1/conversations/{conv_id}/members/me
-
-# 改群名/公告
-PATCH  /v1/conversations/{conv_id}                  {"title":"新群名"}
-
-# 设置角色
-PATCH  /v1/conversations/{conv_id}/members/{actor_id}  {"role": 2}
+{ "members": ["@bob", "@weather_bot"] }
 ```
 
-**角色**：`1=OWNER` `2=ADMIN` `3=MEMBER`
+成员写法与建群一致（`@handle` 或纯数字 `actor_id`，见 §1.7）。
 
-这些操作会产生 `msg_type=SYSTEM` 的系统消息（如「alice 邀请 bob 加入群聊」）。
+```json
+{
+  "code": 0,
+  "data": {
+    "conv_id": 1002,
+    "added": [
+      {
+        "actor_id": 2002,
+        "actor_type": 1,
+        "handle": "bob",
+        "display_name": "Bob",
+        "avatar_url": null,
+        "role": 3,
+        "joined_at": "2026-01-01T08:00:00.123Z"
+      }
+    ],
+    "already_members": [1003],
+    "member_count": 4
+  }
+}
+```
+
+- **已经在群里的人不算错误**：他们出现在 `already_members` 里（只给 `actor_id`），
+  其余人照常加入。一批人里有一个已在群里，不该让另外几个也加不进去。
+  「一个都没加进去」同样不是失败——重复调用与调用一次等价。客户端的动作是
+  **刷新成员列表**（多半是它的视图过期了）。
+- `added` 给的是完整的成员视图而不是一串 id：客户端手里只有它**发出去的** handle，
+  而下面的踢人/改角色接口要的是 `actor_id`。
+- 不要求与邀请人是好友：建群都不要求成员互为好友（DESIGN §11.6），后续加人要求的话，
+  换来的只是「想拉个人得先加好友，而加好友又要先找到这个人」。
+
+#### 踢人
+
+```http
+DELETE /v1/conversations/1002/members/2002
+```
+
+```json
+{ "code": 0, "data": { "conv_id": 1002, "actor_id": 2002, "member_count": 3 } }
+```
+
+目标不在群里回 **`40908`**（不是静默成功）：重复的「移出」看起来像幂等，
+但那样一个拼错的 `actor_id` 也会「成功」，而客户端以为自己刚踢掉了一个人。
+`40908` 的客户端动作是「刷新成员列表」——并发踢同一人时后到的那个拿到的正是它。
+
+#### 退群
+
+```http
+DELETE /v1/conversations/1002/members/me
+```
+
+```json
+{ "code": 0, "data": { "conv_id": 1002, "actor_id": 3003, "member_count": 2 } }
+```
+
+路径里是字面量 `me`（不是自己的 `actor_id`）：客户端不需要先查出自己的 id，
+也不存在「说成退群、实际踢了别人」这种形状。响应里给出具体是谁。
+
+群主退群回 **`40306`**：群主一退，群就没有主了，而「恰有一个 OWNER」是上面所有权限判断的前提。
+
+#### 改群名
+
+```http
+PATCH /v1/conversations/1002
+Content-Type: application/json
+
+{ "title": "新群名" }
+```
+
+```json
+{ "code": 0, "data": { "conv_id": 1002, "title": "新群名" } }
+```
+
+> **群公告（`notice`）还没做**：`conversation` 表里没有那一列。真要做时它会是一个可改字段，
+> 走的正是这个接口（而不是建群时的一次性输入）。
+
+#### 设置角色 / 转让群主
+
+```http
+PATCH /v1/conversations/1002/members/2002
+Content-Type: application/json
+
+{ "role": 2 }
+```
+
+```json
+{
+  "code": 0,
+  "data": { "conv_id": 1002, "actor_id": 2002, "role": 2, "owner_actor": 1001, "member_count": 4 }
+}
+```
+
+- `role=2/3`：普通角色设置，**只有群主能做**。
+- `role=1`：**转让群主**——一个原子动作：目标升为 OWNER、调用者降为 ADMIN、
+  `conversation.owner_actor` 改指目标。响应里的 `owner_actor` 是**生效后**的群主，
+  调用者据此知道自己已经不是群主了（否则它刷新前会继续显示群主专属按钮，点了只会得到 `40305`）。
+- 设成它当前已经是的那个角色是**幂等**的：不写库、不产生系统消息（客户端按当前角色回填下拉框，
+  点一下确定往往就是同一个值）。
+
+#### 错误码
+
+| code | 何时 | HTTP |
+|---|---|---|
+| `40402` | 会话不存在 | 200 |
+| `40303` | **我**不是这个会话的成员 | 403 |
+| `40302` | 这个 `conv_id` 是单聊（`conv_type=1`），不支持成员管理/群名 | 403 |
+| `40305` | 我的角色不够（含「想动群主」与「ADMIN 想动 ADMIN」） | 403 |
+| `40306` | 群主不能直接退群 | 403 |
+| `40904` | 目标是我自己（踢自己 / 改自己的角色） | 200 |
+| `40908` | **目标**不在这个群里（成员列表多半过期了） | 200 |
+| `40906` | 加人后超过单群上限（默认 500） | 200 |
+| `40001` | `members` 缺失或为空、`title` 为空、`role` 缺失 | 200 |
+| `40002` | `title` 超长（> 128）、`role` 不是 1/2/3 | 200 |
+| `40000` | 请求体结构不符（例如 `role` 写成了 `"ADMIN"`） | 200 |
+| `40401` | `members` 里有查不到的 `@handle` | 200 |
+
+> `40303` 与 `40908` 分开是必需的：前者在**每个**会话接口上都可能出现，客户端的动作是
+> 「我已经不在会话里了」——关掉页面、从会话列表里删掉；后者的动作只是刷新成员列表。
+> 共用一个码会让一次「成员列表过期」被当成「我失去了这个会话」，而那个误判是破坏性的。
+
+#### 这些操作产生的系统消息
+
+它们各写一条 `msg_type=SYSTEM` 消息（DESIGN §11.2），**写失败不让请求失败**
+（它是通知，不是事实——数据已经改了）。`sender_id` 是发起人（退群时是退出的人自己），
+`content` 里的 `actor_id` 是**事件当事人**：
+
+| action | content | 何时 |
+|---|---|---|
+| `group_created` | `actor_id` | 建群（§4.2） |
+| `member_joined` | `actor_id` `handle` `display_name` | 加人成功一个 |
+| `member_left` | 同上 | 退群 |
+| `member_removed` | 同上 | 被踢出 |
+| `member_role_changed` | 同上 + `role` | 角色被改 |
+| `owner_transferred` | 同上 | 转让群主（`actor_id` 是新群主） |
+| `title_changed` | `title` | 改群名 |
+
+```json
+{ "action": "member_left", "actor_id": 3003, "handle": "carol", "display_name": "Carol" }
+```
+
+> **为什么 `content` 里要带 `handle`/`display_name`**：退群与被踢的人已经不在成员表里了，
+> 而客户端渲染「carol 退出了群聊」时要的正是这个名字——它只能从这里取（客户端手里的成员列表
+> 已经刷新过，那个人不在了）。名字是**发送时**的快照，与消息本身一样是历史事实。
+>
+> 被移出的人**收不到**这条通知（通知是在成员行删掉之后写的），他的客户端会在下一次操作时
+> 拿到 `40303`，并按「我已不在这个会话」处理。
 
 ---
 

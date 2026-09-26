@@ -52,6 +52,58 @@ public interface ConversationRepository {
     boolean addMember(long convId, long actorId, com.tm.im.domain.enums.MemberRole role,
                       java.time.LocalDateTime joinedAt);
 
+    /**
+     * 移除成员（§4.9 的踢人与退群共用）。
+     *
+     * @return 真的删掉了一行；{@code false} 表示他本来就不在群里（并发下两次踢同一人时，
+     *         后一个拿到 false）。是否把 false 当成错误由调用方决定：重复的「移出」是一个
+     *         已经成立的心愿，而「设置角色」不是——所以两处的处理不一样。
+     */
+    boolean removeMember(long convId, long actorId);
+
+    /**
+     * 改成员角色（§4.9 的 {@code PATCH .../members/{{actor_id}}}）。
+     *
+     * <p>刻意<b>不</b>在这里校验「谁有权给谁改角色」：那要读会话、读操作者的角色，
+     * 是核心模块的规则（{@code ConversationService}）。仓储只提供「改这一行」这一个动作，
+     * 规则只有一处，不会出现「REST 能改、别的入口不能改」。
+     *
+     * @return 命中了一行；{@code false} 表示这个人在这个会话里没有成员行
+     */
+    boolean updateMemberRole(long convId, long actorId, com.tm.im.domain.enums.MemberRole role);
+
+    /**
+     * 转让群主 —— <b>三条写入必须在同一个事务里</b>：
+     * <ol>
+     *   <li>{@code conversation.owner_actor} 指向新群主；</li>
+     *   <li>新群主的成员行 {@code role=1}；</li>
+     *   <li>旧群主的成员行 {@code role=2}（降为 ADMIN，见 03-rest-api.md §4.9 的取舍）。</li>
+     * </ol>
+     *
+     * <p><b>为什么必须原子</b>：这三行合起来才是「群里恰有一个 OWNER」这条不变式。
+     * 只写前两行时群里有<b>两个</b> OWNER（旧群主仍留着 1），而权限判据是成员行的角色，
+     * 于是两个人都能转让、都能踢掉对方，且任何一种顺序都无法收敛。
+     * 只写第一行则更糟：{@code owner_actor} 说 A 是群主、成员行说 B 是群主，
+     * 而「谁能退群」（40306）读前者、「谁能改角色」读后者——表现为「群主退了，群却没主」。
+     *
+     * <p>条件式更新（{@code WHERE ... AND role = 1}）而不是无条件 SET：并发的两次转让里
+     * 只有一次能改到行。第二次拿到 0 行影响数 → 返回 false，调用方据此回 40305
+     * （「你已经不是群主了」），而不是把新群主又降成 ADMIN。
+     *
+     * @return 是否真的转让了；{@code false} 表示 {@code fromActorId} 当前不是这个群的群主
+     */
+    boolean transferOwnership(long convId, long fromActorId, long toActorId);
+
+    /**
+     * 改群名（§4.9 的 {@code PATCH /v1/conversations/{{conv_id}}}）。
+     *
+     * <p>库里的 {@code conversation} 没有「群公告」列，所以「改群名/公告」目前只有群名这一半
+     * （README 里那条已知差异的后续：真做公告时它也是一个可改字段，走的正是本方法旁边的位置）。
+     *
+     * @return 命中了一行；{@code false} 表示会话不存在（调用方已在更早的步骤查过，正常不会出现）
+     */
+    boolean updateTitle(long convId, String title);
+
     /** 幂等：重复调用与调用一次等价。 */
     void updateLastReadSeq(long convId, long actorId, long lastReadSeq);
 

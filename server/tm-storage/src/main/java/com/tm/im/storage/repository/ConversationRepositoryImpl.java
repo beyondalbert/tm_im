@@ -206,6 +206,81 @@ public class ConversationRepositoryImpl implements ConversationRepository {
                 .last("LIMIT 1")));
     }
 
+    /**
+     * 移除成员行（§4.9）。
+     *
+     * <p>用 DELETE 而不是「标记 {@code left_at}」：成员表没有那一列，而且「不在群里」的
+     * 唯一表达就是没有这一行——{@code isMember}、{@code listMemberIds}（扇出）、
+     * {@code listMemberships}（我的会话列表）全都读它。加一个软删除标记意味着这三处
+     * 各要加一个过滤条件，而漏掉任何一处的表现都是「退群了还在收消息」。
+     *
+     * @return 影响行数是否为 1；false = 这一行本来就不在
+     */
+    @Override
+    public boolean removeMember(long convId, long actorId) {
+        int rows = memberMapper.delete(Wrappers.<ConversationMember>lambdaQuery()
+                .eq(ConversationMember::getConvId, convId)
+                .eq(ConversationMember::getActorId, actorId));
+        return rows > 0;
+    }
+
+    @Override
+    public boolean updateMemberRole(long convId, long actorId, MemberRole role) {
+        int rows = memberMapper.update(null, Wrappers.<ConversationMember>lambdaUpdate()
+                .eq(ConversationMember::getConvId, convId)
+                .eq(ConversationMember::getActorId, actorId)
+                .set(ConversationMember::getRole, role));
+        return rows > 0;
+    }
+
+    /**
+     * 转让群主：三行写入一个事务（不变式见接口注释）。
+     *
+     * <p><b>为什么中间那一步要抛而不是返回 false</b>：{@code demoted == 0} 是「调用者
+     * 已经不是群主了」——并发转让的正常结果，调用方回 40305 即可。而
+     * {@code promoted == 0}／{@code renamed == 0} 是「成员行或会话行在两次查询之间不见了」，
+     * 属于数据不一致；此时事务已经改了一半（旧群主已降为 ADMIN），必须滚回去。
+     * 返回 false 会让调用方以为「什么事都没发生」，而库里已经改了一行。
+     */
+    @Override
+    @Transactional
+    public boolean transferOwnership(long convId, long fromActorId, long toActorId) {
+        int demoted = memberMapper.update(null, Wrappers.<ConversationMember>lambdaUpdate()
+                .eq(ConversationMember::getConvId, convId)
+                .eq(ConversationMember::getActorId, fromActorId)
+                .eq(ConversationMember::getRole, MemberRole.OWNER)
+                .set(ConversationMember::getRole, MemberRole.ADMIN));
+        if (demoted == 0) {
+            return false;
+        }
+        int promoted = memberMapper.update(null, Wrappers.<ConversationMember>lambdaUpdate()
+                .eq(ConversationMember::getConvId, convId)
+                .eq(ConversationMember::getActorId, toActorId)
+                .set(ConversationMember::getRole, MemberRole.OWNER));
+        if (promoted == 0) {
+            throw new IllegalStateException("转让群主：目标成员行不存在 convId=" + convId
+                    + " toActorId=" + toActorId + "（旧群主已降级，本事务必须回滚）");
+        }
+        int renamed = conversationMapper.update(null, Wrappers.<Conversation>lambdaUpdate()
+                .eq(Conversation::getId, convId)
+                .eq(Conversation::getOwnerActor, fromActorId)
+                .set(Conversation::getOwnerActor, toActorId));
+        if (renamed == 0) {
+            throw new IllegalStateException("转让群主：conversation.owner_actor 不是 " + fromActorId
+                    + " convId=" + convId + "（成员行已改，本事务必须回滚）");
+        }
+        log.info("转让群主完成 convId={} from={} to={}", convId, fromActorId, toActorId);
+        return true;
+    }
+
+    @Override
+    public boolean updateTitle(long convId, String title) {
+        int rows = conversationMapper.update(null, Wrappers.<Conversation>lambdaUpdate()
+                .eq(Conversation::getId, convId)
+                .set(Conversation::getTitle, title));
+        return rows > 0;
+    }
+
     @Override
     public boolean isMember(long convId, long actorId) {
         return memberMapper.exists(Wrappers.<ConversationMember>lambdaQuery()

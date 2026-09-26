@@ -2,8 +2,10 @@ package com.tm.im.api.user.controller;
 
 import com.fasterxml.jackson.databind.JsonNode;
 import com.tm.im.api.user.auth.CurrentActor;
+import com.tm.im.api.user.view.AddMembersRequest;
 import com.tm.im.api.user.view.ConversationDetailView;
 import com.tm.im.api.user.view.ConversationPageView;
+import com.tm.im.api.user.view.ConversationTitleView;
 import com.tm.im.api.user.view.ConversationViews;
 import com.tm.im.api.user.view.DirectConversationRequest;
 import com.tm.im.api.user.view.DirectConversationView;
@@ -11,11 +13,16 @@ import com.tm.im.api.user.view.GroupConversationRequest;
 import com.tm.im.api.user.view.GroupConversationView;
 import com.tm.im.api.user.view.IncrementalView;
 import com.tm.im.api.user.view.MarkReadRequest;
+import com.tm.im.api.user.view.MemberAddView;
+import com.tm.im.api.user.view.MemberRemovedView;
+import com.tm.im.api.user.view.MemberRoleView;
 import com.tm.im.api.user.view.MessagePageView;
 import com.tm.im.api.user.view.MessageViews;
 import com.tm.im.api.user.view.ReadView;
 import com.tm.im.api.user.view.SendMessageRequest;
 import com.tm.im.api.user.view.SendResultView;
+import com.tm.im.api.user.view.UpdateMemberRoleRequest;
+import com.tm.im.api.user.view.UpdateTitleRequest;
 import com.tm.im.common.api.ApiResponse;
 import com.tm.im.common.error.ErrorCode;
 import com.tm.im.common.error.TmException;
@@ -24,7 +31,9 @@ import com.tm.im.core.identity.AuthContext;
 import com.tm.im.core.message.MessageCommandPort;
 import com.tm.im.core.message.MessageService;
 import com.tm.im.domain.enums.MessageType;
+import org.springframework.web.bind.annotation.DeleteMapping;
 import org.springframework.web.bind.annotation.GetMapping;
+import org.springframework.web.bind.annotation.PatchMapping;
 import org.springframework.web.bind.annotation.PathVariable;
 import org.springframework.web.bind.annotation.PostMapping;
 import org.springframework.web.bind.annotation.RequestBody;
@@ -36,7 +45,7 @@ import java.time.ZoneId;
 import java.util.Locale;
 
 /**
- * 会话与消息（03-rest-api.md §4.1–§4.8）。
+ * 会话与消息（03-rest-api.md §4.1–§4.9）。
  *
  * <p><b>本控制器里没有任何业务判断</b>：谁能发、能不能发、成员资格、上限、页码收敛
  * 全在 {@link ConversationService} 与 {@code MessageService} 里。这里只做三件机械的事——
@@ -181,6 +190,75 @@ public class ConversationController {
         }
         return ApiResponse.ok(ConversationViews.read(
                 conversations.markRead(caller.actorId(), convId, request.lastReadSeq())));
+    }
+
+    // ================================================================== 群成员管理（§4.9）
+
+    /** §4.9 加人。幂等：已经在群里的从 {@code already_members} 里回，不算错。 */
+    @PostMapping("/{convId}/members")
+    public ApiResponse<MemberAddView> addMembers(
+            @CurrentActor AuthContext caller,
+            @PathVariable long convId,
+            @RequestBody AddMembersRequest request) {
+        return ApiResponse.ok(ConversationViews.memberAdd(
+                conversations.addMembers(caller.actorId(), convId, request.members()), databaseZone));
+    }
+
+    /** §4.9 踢人。目标不在群里回 40908（不是幂等成功，见服务端注释）。 */
+    @DeleteMapping("/{convId}/members/{actorId}")
+    public ApiResponse<MemberRemovedView> removeMember(
+            @CurrentActor AuthContext caller,
+            @PathVariable long convId,
+            @PathVariable long actorId) {
+        return ApiResponse.ok(ConversationViews.memberRemoved(
+                conversations.removeMember(caller.actorId(), convId, actorId)));
+    }
+
+    /**
+     * §4.9 退群。
+     *
+     * <p>{@code me} 是字面量而不是一个 actor_id：路由里出现非数字时 Tomcat 会回 400
+     * （框架自己的错误体，不是我们的信封），而 {@code /members/me} 这种写法不需要
+     * 客户端先查出自己的 id，也不给对方一个「踢别人却说成退群」的形状。
+     * 它与 {@code /{actorId}} 不冲突：Spring 的模式比较里**字面量段比变量段更具体**，
+     * 所以 {@code /members/me} 总是选中这个映射，与两个映射的声明顺序无关。
+     */
+    @DeleteMapping("/{convId}/members/me")
+    public ApiResponse<MemberRemovedView> leaveGroup(
+            @CurrentActor AuthContext caller,
+            @PathVariable long convId) {
+        return ApiResponse.ok(ConversationViews.memberRemoved(
+                conversations.leaveGroup(caller.actorId(), convId)));
+    }
+
+    /** §4.9 改群名。幂等：同名重复上报不写库、也不产生系统消息。 */
+    @PatchMapping("/{convId}")
+    public ApiResponse<ConversationTitleView> updateTitle(
+            @CurrentActor AuthContext caller,
+            @PathVariable long convId,
+            @RequestBody UpdateTitleRequest request) {
+        return ApiResponse.ok(ConversationViews.title(
+                conversations.renameGroup(caller.actorId(), convId, request.title())));
+    }
+
+    /**
+     * §4.9 设置角色（{@code role=1} 即转让群主）。
+     *
+     * <p>只判「有没有」不判「对不对」：{@code role=0/4} 是取值非法（40002），
+     * 与字段缺失（40001）不是同一件事，而后者只有这里能看出——枚举反查在服务里，
+     * 它对 {@code null} 会顺理成章地当成普通越界值。
+     */
+    @PatchMapping("/{convId}/members/{actorId}")
+    public ApiResponse<MemberRoleView> updateMemberRole(
+            @CurrentActor AuthContext caller,
+            @PathVariable long convId,
+            @PathVariable long actorId,
+            @RequestBody UpdateMemberRoleRequest request) {
+        if (request.role() == null) {
+            throw new TmException(ErrorCode.MISSING_PARAMETER, "role 缺失（1=OWNER 2=ADMIN 3=MEMBER）");
+        }
+        return ApiResponse.ok(ConversationViews.memberRole(
+                conversations.changeRole(caller.actorId(), convId, actorId, request.role())));
     }
 
     // ================================================================== 协议翻译

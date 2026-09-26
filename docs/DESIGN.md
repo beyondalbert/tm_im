@@ -941,6 +941,13 @@ sequenceDiagram
 ### 11.2 群聊
 
 - 建群产生 `SYSTEM` 消息（「X 邀请 Y 加入」）。
+- 成员管理（加人 / 踢人 / 退群 / 改群名 / 改角色）各产生一条 `SYSTEM` 消息，
+  `content.action` 取值：`group_created` / `member_joined` / `member_left` /
+  `member_removed` / `member_role_changed` / `owner_transferred` / `title_changed`。
+  完整字段与权限矩阵见 03-rest-api.md §4.9。
+- **权限只有一条判据**：目标的角色码必须严格大于我的（`1=OWNER` `2=ADMIN` `3=MEMBER`）。
+  于是「没人能踢群主」与「两个 ADMIN 互相踢不动」都是这条式子的推论，
+  而「群里恰有一个 OWNER」由转让的原子性保证（三行一起改，见 `ConversationRepository`）。
 - 投递按 §10.3 分级；大群客户端靠 `last_seq` 增量拉（走 §10.2 的续传路径）。
 - 角色：`OWNER` / `ADMIN` / `MEMBER`。
 
@@ -1160,7 +1167,8 @@ M3 的验收标准是「浏览器双开互发文字，seq 严格递增」。它�
 | `GET /v1/me` | 已实现 | `AppHttpIT`（含 snake_case 与时间格式断言） |
 | **会话：单聊/建群/列表/详情**（§4.1–§4.4） | 已实现 | `ConversationServiceTest`（27 用例）+ `ConversationHttpIT` + `ConversationReadPathIT` |
 | **消息：发送/历史/增量/已读**（§4.5–§4.8） | 已实现 | 同上（写路径复用 `MessageService`，因此错误码与长连接完全一致） |
-| 会话成员管理（§4.9） | **未实现** | 加人/踢人/退群/改群名/改角色，会产生 `SYSTEM` 消息 |
+| **会话成员管理**（§4.9） | 已实现 | `ConversationMemberServiceTest`（19 用例）+ `ConversationMemberHttpIT`（6 用例，真实 HTTP）+ `ConversationReadPathIT`（转让的原子性与回滚）+ `mutate_member_rules.py`（15 个变异全部被捕获） |
+| 群公告（`notice`） | **未实现** | §4.9 的 `PATCH /v1/conversations/{id}` 只改群名；公告需要一个新列（DDL + 生成器 + 实体 + 迁移），见 README 的「已知不一致」 |
 | 好友（§3）/ 图片（§5）/ 广场（§6）/ Agent 管理（§7） | **未实现** | — |
 | 用户端 Vue 脚手架 | **未实现** | M3 验收标准的最后一步 |
 | 跨节点投递 `tm:push:{nodeId}` | **未实现** | 见 §7.4 |

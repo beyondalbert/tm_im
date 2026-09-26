@@ -213,6 +213,82 @@ class ConversationReadPathIT {
                 .containsExactly(3L);
     }
 
+    // ================================================================ 群成员管理（§4.9 的写路径）
+
+    @Test
+    @DisplayName("removeMember / updateMemberRole：命中返回 true，人不在群里返回 false")
+    void memberWritesReportWhetherTheyHitARow() {
+        long convId = newId();
+        conversations.createGroup(group(convId, "IT 群"), List.of(
+                member(convId, ALICE, MemberRole.OWNER, T0),
+                member(convId, BOB, MemberRole.MEMBER, T0)));
+
+        assertThat(conversations.updateMemberRole(convId, BOB, MemberRole.ADMIN)).isTrue();
+        assertThat(conversations.findMember(convId, BOB).orElseThrow().getRole())
+                .isEqualTo(MemberRole.ADMIN);
+        assertThat(conversations.updateMemberRole(convId, CAROL, MemberRole.ADMIN))
+                .as("没有成员行可改——调用方要回 40908 而不是静默成功")
+                .isFalse();
+
+        assertThat(conversations.removeMember(convId, BOB)).isTrue();
+        assertThat(conversations.findMember(convId, BOB)).isEmpty();
+        assertThat(conversations.removeMember(convId, BOB)).as("再删一次没有行可删").isFalse();
+        assertThat(conversations.countMembers(convId)).isEqualTo(1L);
+    }
+
+    @Test
+    @DisplayName("transferOwnership：三行一起改；目标不是成员时抛异常并<b>整笔回滚</b>")
+    void transferOwnershipIsAtomic() {
+        long convId = newId();
+        conversations.createGroup(group(convId, "IT 群"), List.of(
+                member(convId, ALICE, MemberRole.OWNER, T0),
+                member(convId, BOB, MemberRole.MEMBER, T0),
+                member(convId, CAROL, MemberRole.MEMBER, T0)));
+
+        assertThat(conversations.transferOwnership(convId, ALICE, BOB)).isTrue();
+        assertThat(conversations.findMember(convId, BOB).orElseThrow().getRole())
+                .isEqualTo(MemberRole.OWNER);
+        assertThat(conversations.findMember(convId, ALICE).orElseThrow().getRole())
+                .isEqualTo(MemberRole.ADMIN);
+        assertThat(conversations.findById(convId).orElseThrow().getOwnerActor()).isEqualTo(BOB);
+
+        // 已经不是群主了：条件式更新一行都改不到，必须回 false（而不是把新群主又降下去）
+        assertThat(conversations.transferOwnership(convId, ALICE, CAROL)).isFalse();
+        assertThat(conversations.findMember(convId, CAROL).orElseThrow().getRole())
+                .isEqualTo(MemberRole.MEMBER);
+        assertThat(conversations.findById(convId).orElseThrow().getOwnerActor()).isEqualTo(BOB);
+
+        // ★ 目标成员行不存在：第一行已经改了，事务必须把整笔回滚。
+        // 这一条盯的是 @Transactional 有没有真的经过代理生效（自调用不走代理时它会静默失效，
+        // 而失效的表现是「旧群主降成了 ADMIN，新群主却没升上去」——群里一个 OWNER 都没有）。
+        assertThatThrownBy(() -> conversations.transferOwnership(convId, BOB, CAROL + 999))
+                .isInstanceOf(IllegalStateException.class);
+        assertThat(conversations.findMember(convId, BOB).orElseThrow().getRole())
+                .as("回滚后新群主仍是 OWNER")
+                .isEqualTo(MemberRole.OWNER);
+        assertThat(conversations.findById(convId).orElseThrow().getOwnerActor())
+                .as("回滚后 owner_actor 仍是旧值")
+                .isEqualTo(BOB);
+    }
+
+    @Test
+    @DisplayName("updateTitle：只动 title 一列")
+    void updateTitleOnlyTouchesTheTitle() {
+        long convId = newId();
+        conversations.createGroup(group(convId, "旧群名"), List.of(
+                member(convId, ALICE, MemberRole.OWNER, T0),
+                member(convId, BOB, MemberRole.MEMBER, T0)));
+
+        assertThat(conversations.updateTitle(convId, "新群名")).isTrue();
+
+        Conversation updated = conversations.findById(convId).orElseThrow();
+        assertThat(updated.getTitle()).isEqualTo("新群名");
+        assertThat(updated.getOwnerActor()).as("改群名不该动群主").isEqualTo(ALICE);
+        assertThat(updated.getConvType()).isEqualTo(ConvType.GROUP);
+        assertThat(conversations.countMembers(convId)).as("也不该动成员").isEqualTo(2L);
+        assertThat(conversations.updateTitle(convId + 999, "没有这个会话")).isFalse();
+    }
+
     // ================================================================ 辅助
 
     private static long newId() {

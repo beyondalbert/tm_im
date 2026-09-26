@@ -43,6 +43,11 @@ CHECKS = [
     # 命令字契约是手写三份的（proto / 接入文档 / 服务端 Frames），三份之间没有任何
     # 编译期约束。CMD_SYNC 曾经一个编号同时充当请求与响应，就是这么溜进去的。
     ("mutate-cmd", "mutate_command_contract.py", "变异测试：命令字契约三方一致校验器不是摆设", "protobuf", []),
+    # 权限矩阵与状态机（§4.9）的规则全是「改坏了照样能跑」那一类：少一个等号、把静默成功
+    # 当成幂等、把写通知与删成员行的顺序调过来——它们只能靠测试钉住。这里跑的是不需要
+    # 外部服务的那 14 条；第 15 条（转让群主去掉 @Transactional）要真实 MySQL，在 --services 里。
+    ("mutate-member", "mutate_member_rules.py",
+     "变异测试：群成员管理的 14 条规则都有测试钉住", "", ["--unit-only"]),
     # 续传读取路径的规则都属于「改坏了照样能跑、而且看起来更正常」那一类：
     # 少取一行不报错、has_more=true 时多回一帧 END 不报错、失败时静默回空结果更不报错。
     # 它们只能靠测试钉住，而测试本身也需要被验证（约 2.5 分钟：每个变异跑一次 mvn）。
@@ -63,6 +68,10 @@ SERVICE_CHECKS = [
     # 只跑不需要外部服务的那 8 条： python tools/mutate_cluster_routing.py --unit-only
     ("mutate-cluster", "mutate_cluster_routing.py",
      "变异测试：集群路由/节点探活的 13 条规则都有测试钉住", "", []),
+    # 同一套规则的「事务」那一半：内存替身没有事务，所以它只能在真实 MySQL 上验。
+    # 单独一条而不是混进 CHECKS，原因与上面那组一样：没有凭据的机器上它会因环境而变红。
+    ("mutate-member-tx", "mutate_member_rules.py",
+     "变异测试：转让群主的事务性必被捕获（需真实 MySQL）", "", ["转让群主去掉事务"]),
 ]
 
 USE_COLOR = sys.stdout.isatty()
@@ -108,7 +117,8 @@ def main() -> int:
     checks = CHECKS
     if args.quick:
         checks = [c for c in checks
-                  if c[0] not in ("docs", "mutate", "mutate-deps", "mutate-cfg", "mutate-cmd")]
+                  if c[0] not in ("docs", "mutate", "mutate-deps", "mutate-cfg", "mutate-cmd",
+                                  "mutate-member")]
     checks = list(checks) + (list(SERVICE_CHECKS) if args.services else [])
     print(BOLD("tm_im 全量自检"))
     print(DIM(f"  仓库: {REPO}"))

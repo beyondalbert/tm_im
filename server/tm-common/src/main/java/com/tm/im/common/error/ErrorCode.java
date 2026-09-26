@@ -63,9 +63,28 @@ public enum ErrorCode {
     REQUEST_PENDING(40902, "request pending", false),
     BLOCKED(40903, "blocked", false),
     SELF_OPERATION(40904, "self operation", false),
+    /**
+     * 已经是群成员。
+     *
+     * <p><b>§4.9 的「加人」刻意不返回它</b>：那个接口收的是一<b>批</b>人，其中几个已在群里
+     * 不该让另外几个也加不进去（部分成功不能报错），而「一个都没加进去」也不是失败
+     * （重复调用与调用一次等价，与 {@code openDirect} 的 {@code created=false} 同一取舍）。
+     * 真正的做法是把被跳过的人在响应里列出来（{@code already_members}），客户端据此刷新列表。
+     * 于是本码在 §4.9 里没有使用处——留着是因为它是错误码总表的一部分。
+     */
     ALREADY_MEMBER(40905, "already member", false),
     GROUP_MEMBER_LIMIT(40906, "group member limit", false),
     ALREADY_LIKED(40907, "already liked", false),
+    /**
+     * 「目标不是这个会话的成员」——只用于 §4.9 里<b>以别人为对象</b>的接口（踢人、改角色）。
+     *
+     * <p>为什么不复用 {@link #NOT_A_MEMBER}：那个码在每一个会话接口上都可能出现，
+     * 客户端的处理是「我已经不在会话里了」——关掉页面、把它从会话列表里删掉。
+     * 而「目标（另一个人）不在群里」该做的动作完全不同：刷新成员列表，页面照旧。
+     * 共用一个码会让一次「成员列表过期」被当成「我失去了这个会话」，
+     * 而那个误判是<b>破坏性</b>的（客户端会删掉本地会话）。
+     */
+    TARGET_NOT_MEMBER(40908, "target not a member", false),
 
     // ======================= 限流 42900-42999 =======================
     RATE_LIMIT_EXCEEDED(42901, "rate limit exceeded", true),
@@ -133,7 +152,7 @@ public enum ErrorCode {
         if (code >= 50000) {
             return 500;
         }
-        // 其余（含 40400-40907 资源类）都是「业务失败但 HTTP 200」。
+        // 其余（含 40400-40908 资源类）都是「业务失败但 HTTP 200」。
         // 注意 404 状态码在本系统专指「路由不存在」，不用于「资源不存在」。
         return 200;
     }

@@ -77,17 +77,18 @@ uv run --with protobuf --with pyyaml --with sqlglot python tools/verify_all.py
 | `mutate-cfg` | **变异测试**：验证模板校验器能抓到 5 类缺陷 |
 | `mutate-cmd` | **变异测试**：验证命令字契约校验器能抓到 10 类缺陷（方向写反、编号错、漏登记、漏写方向…） |
 
-`--quick` 跳过耗时的 `docs` / `mutate` / `mutate-deps` / `mutate-cfg` / `mutate-cmd`。
+`--quick` 跳过耗时的 `docs` / `mutate` / `mutate-deps` / `mutate-cfg` / `mutate-cmd` / `mutate-member`。
 
-另有 2 项需要外部 MySQL/Redis（`runtime-cfg` = 运行时配置是否与当前
-`local-conn.env` 一致，`collation` = 实测服务端排序规则等价性），用 `--services` 打开：
+另有 4 项需要外部 MySQL/Redis（`runtime-cfg` = 运行时配置是否与当前
+`local-conn.env` 一致，`collation` = 实测服务端排序规则等价性，`mutate-cluster` = 集群路由的
+13 条规则，`mutate-member-tx` = 转让群主的事务性），用 `--services` 打开：
 
 ```bash
 uv run --with protobuf --with pyyaml --with sqlglot --with pymysql \
   python tools/verify_all.py --services
 ```
 
-不加 `--services` 时脚本会明确打印「跳过了 2 项需要外部服务的检查」——
+不加 `--services` 时脚本会明确打印「跳过了 N 项需要外部服务的检查」——
 而不是让读者以为绿色代表全都验过了。
 
 ### 建表 SQL 为什么是生成的
@@ -375,6 +376,12 @@ Tomcat + Netty + ShardingSphere + Redis + MyBatis-Plus + 全部配置类真启�
 `POST /v1/conversations/{id}/read` 已实现（§4.1–§4.8）。写消息、上报已读、增量拉取
 都**转调**长连接那条路径（`MessageService`），所以不会出现「REST 能发、长连接不能发」这种情况。
 
+群成员管理（§4.9）也已实现：`POST`/`DELETE /v1/conversations/{id}/members`、
+`DELETE .../members/me`、`PATCH /v1/conversations/{id}`、`PATCH .../members/{actor_id}`。
+它的规则里最值得记的是**权限判据只有一条**：目标的角色码必须严格大于我的
+（`1=OWNER` `2=ADMIN` `3=MEMBER`）——于是「没人能踢群主」与「两个 ADMIN 互相踢不动」
+都是这条式子的推论，不需要为它们单独写规则，也不可能写出两套不一致的规则。
+
 几处决定值得单独说，因为它们的「更简单写法」都能跑通、只是会错：
 
 | 决定 | 不这么做会怎样 |
@@ -386,9 +393,26 @@ Tomcat + Netty + ShardingSphere + Redis + MyBatis-Plus + 全部配置类真启�
 | 建群的系统消息**写失败不回滚** | 让一条通知决定建群成败，客户端会因为通知写不进去而重试建群，于是得到**两个群**；丢掉通知只表现为「这个群的第一条消息是空的」 |
 | 建群用**一个仓储方法**在同一事务里写会话行 + 全部成员行 | 逐个写是 N+1 个事务，中途崩溃会留下「成员不全的群」，而客户端重试会建出第二个。`ConversationReadPathIT` 里有一条「成员行写失败则**会话行也不在**」的断言——它盯的是 `@Transactional` 是否真的经过代理生效（这个坑本项目在 `ConversationSeqCounter` 上踩过一次） |
 | 已读上报回的是**生效后**的游标（重新读一次成员行），而不是请求里的值 | 仓储的更新是「只前进」的，客户端乱序上报一个小值时会话内已读是 7 而响应说 3，`unread_count` 凭空变大——而那正是用户唯一会看的那个数字 |
+| 加人时**「已经在群里」不是错误**（列在 `already_members` 里），而踢人时「目标不在群里」是 `40908` | 两者看起来像同一件事，实际不是：一批人里有一个已在群里，不该让**另外几个**也加不进去（部分成功不能报错）；而踢人时目标不在，说明客户端的成员列表过期了（或 `actor_id` 拼错了）——静默成功会让一个拼错的 id 看起来像踢成功了 |
+| 退群的通知**先写、成员行后删**；其余几个接口反过来 | `MessageService` 要求 SYSTEM 消息的作者当时是成员（否则客户端伪造系统消息那条防护就没了），而我一旦退群就不再是成员。反过来写的代价是那条通知**永远丢失**（重试仍然是先删） |
+| 转让群主是**一个仓储方法里的三行写入**（新群主升 1、旧群主降 2、`owner_actor` 重指） | 只改前两行会留下**两个** OWNER，而权限判据读成员行——两个人于是都能转让、都能踢掉对方，任何一种顺序都无法收敛；只改第一行则表现为「群主退了，群却没主」 |
 
 还有一个只在真实 HTTP 下才验得了的东西：`content` 出参必须是 **JSON 对象**（库里存的是 JSON 文本）。
 MockMvc 里那层 Jackson 是测试自己装的，所以这条由 `ConversationHttpIT`（12 个用例，真实启动 + 真实 MySQL/Redis）钉住。
+§4.9 另外单开了一个 `ConversationMemberHttpIT`（6 个用例），原因是它的两个接口用的是 `PATCH`，
+而 `TestRestTemplate` 默认的 `SimpleClientHttpRequestFactory` 底层是 `HttpURLConnection`，
+那个类**不认识 PATCH**（客户端还没发出去就 `ProtocolException: Invalid HTTP method: PATCH`）——
+于是那个类把请求工厂换成 JDK 的 `HttpClient`。这也说明了一件事：
+「服务端支持 PATCH」与「测试工具能发 PATCH」是两个独立的问题，前者的证据只有后者能提供。
+
+成员管理的规则还额外做了一轮**变异测试**（`tools/mutate_member_rules.py`，15 个变异）：
+把每条规则逐一改坏，看它该触发的用例是否必然失败。它们几乎全都属于
+「改坏了照样能跑、而且看起来更正常」那一类——少一个等号（`<=` 写成 `<`）让两个 ADMIN 能互踢、
+踢人时目标不在群里改成静默成功、把「写通知」与「删成员行」调个顺序、
+转让时只改成员行不降旧群主（群里出现两个 OWNER）、去掉 `transferOwnership` 上的
+`@Transactional`（失败时旧群主降了级、新群主却没升上去）——
+这五条都不会报错，只会让群里慢慢变成一个谁也说不清权限状态的东西。
+其中 14 条在 `verify_all.py` 里跑（`--unit-only`），最后一条要找真实 MySQL，在 `--services` 里。
 
 **好友关系是「先写库造出来」的**：加好友的接口是 §3，还没做；而这些用例要验的是发送链路的权限规则，
 不是加好友流程——所以每个用例自己注册一个「对手」并直接写一行 `friendship`，
@@ -470,9 +494,8 @@ S→C  payload = SyncResponse    // 「给你补消息」
 收不到推送，它们靠重连后的 SYNC 补齐（这正是上面那条路径存在的意义）。
 归档/清理任务也还没做，所以 `SyncResponse.truncated` 目前恒为 `false`（§6.4 解释了为什么不猜）。
 
-REST 侧已做完「能登录」与「能开会话、发消息、翻历史」（见 README 的「账号与令牌」
-与「会话与消息」两节），还没做的是：会话**成员管理**（§4.9 的加人/踢人/退群/改群名/改角色，
-它们会额外产生 `SYSTEM` 消息）、好友（§3）、图片（§5）、广场（§6）、Agent 管理（§7），
+REST 侧已做完「能登录」与「能开会话、发消息、翻历史、管成员」（见 README 的「账号与令牌」
+与「会话与消息」两节），还没做的是：好友（§3）、图片（§5）、广场（§6）、Agent 管理（§7），
 以及用户端 Vue 脚手架（M3 验收标准的最后一步）。
 
 > `docs/integration/03-rest-api.md` 里与代码对齐过的地方（已改文档而非改代码）：
@@ -483,11 +506,14 @@ REST 侧已做完「能登录」与「能开会话、发消息、翻历史」（
 > ③ 新增 §1.7 把「`@handle` 与纯数字 actor_id」两种写法写成契约：不带 `@` 的字符串一律
 > `40002`，因为 handle 允许数字（`^[A-Za-z0-9_]{3,32}$`），`"1001"` 猜错的后果是
 > 「消息发给了另一个人」，重试也修不回来；
-> ④ §4.9 标上「未实现」——它现在没有路由，返回的是 `404`，不写清楚会被当成「路由写错了」。
+> ④ §4.9 曾标着「未实现（M4）」——那是对的（当时它没有路由，返回 `404`），
+> 但后来它只在文档里停了很久；实现之后这一节被换成了完整契约（权限矩阵、五个路由、
+> 逐接口的请求/响应示例、错误码表、`action` 取值表）。
 
 > 一处已知的不一致：`conversation` 表没有 `notice`（群公告）列，所以 §4.2/§4.4 的 `notice`
-> 字段没有实现，文档已同步删掉它。真要做公告时它应该是一个**可改的字段**
-> （`PATCH /v1/conversations/{id}`），而不是建群时的一次性输入。
+> 字段没有实现，文档已同步删掉它。§4.9 的 `PATCH /v1/conversations/{id}` 因此**只改群名**。
+> 真要做公告时它应该就是这个接口上的一个**可改字段**（而不是建群时的一次性输入），
+> 而那需要一次 DDL 变更（生成器 + 实体 + 迁移），所以不在这一轮里。
 
 ### SPI 守卫：为什么会有这么一个测试
 
