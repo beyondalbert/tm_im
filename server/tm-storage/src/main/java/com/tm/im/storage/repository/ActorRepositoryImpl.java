@@ -53,4 +53,24 @@ public class ActorRepositoryImpl implements ActorRepository {
         // 群聊场景下循环查会产生 N 次往返（N+1 查询）。
         return mapper.selectBatchIds(actorIds);
     }
+
+    /**
+     * 只更新可变资料字段。
+     *
+     * <p>用 {@code lambdaUpdate} 显式列出要写的四列，而不是 {@code updateById}：
+     * 后者会写入实体上所有非 null 字段，包括 {@code handle} —— 于是一个「只改昵称」
+     * 的 PUT 型调用在拿旧实体回写时会顺手把 handle 也写回去，
+     * 而如果期间有人改过 handle，这里就会把它静默改回旧值。
+     * 显式列出可写列，是把「哪些字段是身份、哪些是资料」写进代码里。
+     */
+    @Override
+    @Transactional
+    public void update(Actor actor) {
+        mapper.update(null, Wrappers.<Actor>lambdaUpdate()
+                .eq(Actor::getId, actor.getId())
+                .set(Actor::getDisplayName, actor.getDisplayName())
+                .set(Actor::getAvatarUrl, actor.getAvatarUrl())
+                .set(Actor::getBio, actor.getBio())
+                .set(Actor::getStatus, actor.getStatus()));
+    }
 }

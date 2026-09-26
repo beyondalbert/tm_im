@@ -1171,10 +1171,13 @@ M3 的验收标准是「浏览器双开互发文字，seq 严格递增」。它�
 | **会话成员管理**（§4.9） | 已实现 | `ConversationMemberServiceTest`（19 用例）+ `ConversationMemberHttpIT`（6 用例，真实 HTTP）+ `ConversationReadPathIT`（转让的原子性与回滚）+ `mutate_member_rules.py`（15 个变异全部被捕获） |
 | **图片：上传/下载/缩略图**（§5） | 已实现 | `MediaServiceTest`（22 用例）+ `LocalFsMediaStoreTest`（9 用例，含路径穿越）+ `MediaHttpIT`（5 用例，真实 multipart 与两处大小限制） |
 | **好友：请求/同意/拒绝/列表/删好友/拉黑**（§3） | 已实现 | `FriendServiceTest`（21 用例）+ `FriendHttpIT`（8 用例，含真实 SQL 的分页与「删好友后 40003」）+ `migrate_schema.py`（friendship 新增 4 列 + 2 索引已落到库上） |
+| **Agent 管理：创建/列表/详情/改配置/轮换/停用**（§7） | 已实现 | `AgentServiceTest`（12 用例）+ `AgentHttpIT`（3 用例，其中一条是对等性验收：Agent 用 api_key 走完「加好友 → 被同意 → 发消息」） |
+| **Agent 主动推送（Webhook 投递）** | **未实现** | 目前只有 `push_mode` 与 `endpoint_url` 的登记与校验（`WEBHOOK` 必须给地址），事件本身尚未发出去。它需要先在扇出路径上回答「这批成员里谁是需要 Webhook 的 Agent」——那是一次批量查询（`AgentProfileRepository.findByIds` 已经就位），但「投递、重试、事件 id 幂等」是一整块（见 05-webhook.md） |
 | 群公告（`notice`） | **未实现** | §4.9 的 `PATCH /v1/conversations/{id}` 只改群名；公告需要一个新列（DDL + 生成器 + 实体 + 迁移），见 README 的「已知不一致」 |
 | 好友集缓存（`tm:friend:{actorId}`） | **未实现** | DESIGN §11.6 的设计里有它，但它要连带解决**跨节点失效**（一个节点的内存缓存删不掉另一个节点的），属于另一件事。当前每次发单聊消息都回源数据库——它一定正确，代价是一次点查 |
 | 图片的用户维度（签名 URL、配额、清理任务） | **未实现** | 当前 `media_id` 即能力（见 03-rest-api §5.2）；`tm.storage.type` 只实现了 `local`，配成 `oss` 会在启动时失败而不是静默降级 |
-| 广场（§6）/ Agent 管理（§7） | **未实现** | — |
+| 广场（§6） | **未实现** | — |
+| §2.3/§2.4（PATCH /v1/me、Actor 搜索） | **未实现** | §2.1 的 GET /v1/me 与 §2.2 的查任意 Actor 也未做——它们很小，但至今未做，列在这里以免被当成“已验证” |
 | 用户端 Vue 脚手架 | **未实现** | M3 验收标准的最后一步 |
 | 跨节点投递 `tm:push:{nodeId}` | 已实现 | `ClusterMessagePushPortTest`（6 用例，网关的四条决策）+ `PushBusRedisIT`（4 用例，真实 Redis：只有目标节点收到、帧逐字节相同、脏载荷只跳过）+ `mutate_cluster_routing.py`（17 个变异，含跳节点推送的 4 条） |
 | 列表按「最近活跃」排序的成本 | **已知且待优化** | 每个会话一次点查（`conversation` 没有 `last_message_at` 列）。修法：给 `conversation_member` 加 `last_activity_at` 并建索引，但那是 DDL 变更（生成器 + 实体 + 迁移），所以本轮选择「先正确、再优化」，并在会话数超过 200 时打 WARN |

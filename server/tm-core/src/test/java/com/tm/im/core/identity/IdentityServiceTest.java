@@ -226,6 +226,11 @@ class IdentityServiceTest {
                     }
                     return out;
                 }
+
+                @Override
+                public void update(Actor actor) {
+                    actors.put(actor.getId(), actor);
+                }
             };
         }
 

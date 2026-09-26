@@ -1,4 +1,4 @@
-// 源: deploy/sql/01-schema.sql  sha256[:16]=3b1df4f3ef040428
+// 源: deploy/sql/01-schema.sql  sha256[:16]=6e25d69f6d539a88
 package com.tm.im.domain.enums;
 
 import com.baomidou.mybatisplus.annotation.EnumValue;

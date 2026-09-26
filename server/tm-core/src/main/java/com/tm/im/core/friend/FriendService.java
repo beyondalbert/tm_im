@@ -319,8 +319,18 @@ public class FriendService {
                 .flatMap(row -> List.of(row.getActorA(), row.getActorB()).stream()).toList());
         List<RelationEntry> items = new ArrayList<>(page.size());
         for (Friendship row : page) {
-            items.add(new RelationEntry(row, byId.get(row.getActorA()), byId.get(row.getActorB()),
-                    !Objects.equals(row.getInitiator(), actorId)));
+            /*
+             * from 必须是**发起人**，to 必须是**接收人**，而不是 actor_a / actor_b。
+             * 关系表里的两列是无序对（约定 actor_a < actor_b），它们的名字描述的是
+             * 「哪个 id 小」而不是「谁先开口」—— 把它当方向用，会在「接收人的 id 更小」
+             * （即先注册的那个人被后注册的人加）时静默把两个人对调。
+             * 这个错误由 FriendHttpIT 的端到端断言抓到（AgentHttpIT 里 Agent 的 id
+             * 大于人类，正好是那个方向）。
+             */
+            long initiator = row.getInitiator();
+            long target = otherSide(initiator, row);
+            items.add(new RelationEntry(row, byId.get(initiator), byId.get(target),
+                    !Objects.equals(initiator, actorId)));
         }
         String next = hasMore && !page.isEmpty()
                 ? PageCursors.encodeFriendRequest(epochMilli(page.get(page.size() - 1)), 

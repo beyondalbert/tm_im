@@ -87,4 +87,8 @@ class InMemoryActorRepository implements ActorRepository {
         out.sort(Comparator.comparing(Actor::getId));
         return out;
     }
+    @Override
+    public void update(Actor actor) {
+        byId.put(actor.getId(), actor);
+    }
 }

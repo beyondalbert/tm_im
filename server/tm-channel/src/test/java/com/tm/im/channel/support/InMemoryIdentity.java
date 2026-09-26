@@ -120,6 +120,12 @@ public final class InMemoryIdentity {
                 }
                 return found;
             }
+
+            @Override
+            public void update(Actor actor) {
+                throw new UnsupportedOperationException(
+                        "长连接路径不应改 Actor 表：资料修改属于 REST");
+            }
         };
     }
 

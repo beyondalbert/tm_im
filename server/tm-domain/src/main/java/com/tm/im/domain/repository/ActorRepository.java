@@ -25,6 +25,19 @@ public interface ActorRepository {
     /** 插入并回填主键（主键由 Snowflake 生成，不由数据库自增）。 */
     Actor insert(Actor actor);
 
+    /**
+     * 更新可变的资料字段（{@code display_name} / {@code avatar_url} / {@code bio} / {@code status}）。
+     *
+     * <p>刻意不是「更新全部字段」：{@code id} / {@code actor_type} / {@code handle} /
+     * {@code created_at} 都是不可变的（改 handle 等于换个人，而 ID 与类型改了就无从
+     * 解释已有数据），把它们也放进 UPDATE 只是多几个永远不会用的写列。
+     *
+     * <p>实现约定：缺失的行（{@code actor} 不存在）静默不做事——它不改变调用方的
+     * 可观察结果（更新一个不存在的行，结果就是什么都没有变），而抛异常会把
+     * 「账号被并发删了」变成一次 500。
+     */
+    void update(Actor actor);
+
     /** 批量查询，用于消息推送时补齐发送者展示信息（避免 N+1）。 */
     List<Actor> findByIds(List<Long> actorIds);
 }

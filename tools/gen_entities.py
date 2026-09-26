@@ -49,7 +49,8 @@ SHARDED_PHYSICAL_RE = re.compile(r"^message_\d+$")
 ENUM_MAP: dict[tuple[str, str], tuple[str, list[tuple[int, str]]]] = {
     ("actor", "actor_type"): ("ActorType", [(1, "HUMAN"), (2, "AGENT")]),
     ("actor", "status"): ("ActorStatus", [(1, "ACTIVE"), (2, "SUSPENDED")]),
-    ("actor_secret", "secret_type"): ("SecretType", [(1, "PASSWORD_HASH"), (2, "API_KEY_HASH")]),
+    ("actor_secret", "secret_type"): ("SecretType", [(1, "PASSWORD_HASH"), (2, "API_KEY_HASH"),
+                                             (3, "WEBHOOK_SECRET")]),
     ("agent_profile", "push_mode"): ("PushMode", [(1, "WEBHOOK"), (2, "WS"), (3, "PULL")]),
     ("conversation", "conv_type"): ("ConvType", [(1, "DIRECT"), (2, "GROUP")]),
     ("conversation_member", "role"): ("MemberRole", [(1, "OWNER"), (2, "ADMIN"), (3, "MEMBER")]),

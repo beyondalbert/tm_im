@@ -339,6 +339,11 @@ class ApiExceptionHandlerTest {
         public List<Actor> findByIds(List<Long> actorIds) {
             return List.of();
         }
+
+        @Override
+        public void update(Actor actor) {
+            throw new UnsupportedOperationException("本测试不写库");
+        }
     }
 
     /** 本类只走 JWT 路径，凭据表不需要有内容。 */

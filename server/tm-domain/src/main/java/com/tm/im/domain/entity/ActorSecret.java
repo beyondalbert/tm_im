@@ -1,4 +1,4 @@
-// 源: deploy/sql/01-schema.sql  sha256[:16]=3b1df4f3ef040428
+// 源: deploy/sql/01-schema.sql  sha256[:16]=6e25d69f6d539a88
 package com.tm.im.domain.entity;
 
 import com.baomidou.mybatisplus.annotation.IdType;
@@ -26,7 +26,7 @@ public class ActorSecret {
     // 联合主键之一，见类注释：故意不标 @TableId
     private Long actorId;
 
-    /** 1=密码哈希 2=API_KEY哈希 */
+    /** 1=密码哈希 2=API_KEY哈希 3=WEBHOOK密钥(明文,需用于签名) */
     // 联合主键之一，见类注释：故意不标 @TableId
     private SecretType secretType;
 

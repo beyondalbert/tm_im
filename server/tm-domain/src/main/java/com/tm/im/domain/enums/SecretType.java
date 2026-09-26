@@ -1,4 +1,4 @@
-// 源: deploy/sql/01-schema.sql  sha256[:16]=3b1df4f3ef040428
+// 源: deploy/sql/01-schema.sql  sha256[:16]=6e25d69f6d539a88
 package com.tm.im.domain.enums;
 
 import com.baomidou.mybatisplus.annotation.EnumValue;
@@ -12,7 +12,8 @@ import com.baomidou.mybatisplus.annotation.EnumValue;
 public enum SecretType implements CodedEnum {
 
     PASSWORD_HASH(1),
-    API_KEY_HASH(2);
+    API_KEY_HASH(2),
+    WEBHOOK_SECRET(3);
 
     /** 落库值。{@code @EnumValue} 告诉 MyBatis-Plus 用这个字段而不是 name()/ordinal()。 */
     @EnumValue
@@ -40,14 +41,14 @@ public enum SecretType implements CodedEnum {
     /**
      * 反查；未知码值直接抛异常。用于<b>读数据库</b>。
      *
-     * <p>库里出现 1, 2 之外的值，说明数据已损坏或有人绕过应用直接改库。
+     * <p>库里出现 1, 2, 3 之外的值，说明数据已损坏或有人绕过应用直接改库。
      * 此时静默返回 null 会把错误推迟到更远的地方才爆发，还不如就地炸掉。
      */
     public static SecretType require(int code) {
         SecretType v = of(code);
         if (v == null) {
             throw new IllegalArgumentException(
-                    "非法的 SecretType 码值: " + code + "（合法值: 1, 2）");
+                    "非法的 SecretType 码值: " + code + "（合法值: 1, 2, 3）");
         }
         return v;
     }

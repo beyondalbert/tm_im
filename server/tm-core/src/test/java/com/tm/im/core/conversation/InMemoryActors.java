@@ -75,4 +75,8 @@ public class InMemoryActors implements ActorRepository {
         }
         return out;
     }
+    @Override
+    public void update(Actor actor) {
+        byId.put(actor.getId(), actor);
+    }
 }

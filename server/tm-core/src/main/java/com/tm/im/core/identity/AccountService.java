@@ -35,6 +35,11 @@ import java.util.regex.Pattern;
  * 事实：Agent 没有「口令」这个东西，所以它没有「登录」这个动作。
  * 注册出来的行 {@code actor_type} 恒为 {@link ActorType#HUMAN}。
  *
+ * <p>但它里面的两条<b>静态</b>规则（{@link #normalizeHandle} /
+ * {@link #normalizeDisplayName}）是公开的，因为 Agent 创建必须走同一套：
+ * 「@alice 是合法 handle 而 Agent 的 @Bob_Bot 不是」这种事一旦出现，
+ * 「对等」就只剩下口号了。共享的不是代码，是<b>规则</b>。
+ *
  * <p>凡是「一条规则能写在两处」的地方，这里都只写一遍：
  * <ul>
  *   <li>handle 的合法性只在 {@link #HANDLE_PATTERN}；</li>
@@ -297,7 +302,7 @@ public class AccountService {
      * 而 {@code "alice "} 与 {@code "alice"} 在 {@code _ai_ci} 排序规则下
      * 是相等的（PAD SPACE）—— 不 trim 就会变成「注册时看着成功、登录时参数校验失败」。
      */
-    static String normalizeHandle(String handle) {
+    public static String normalizeHandle(String handle) {
         if (handle == null) {
             throw new TmException(ErrorCode.MISSING_PARAMETER, "handle 缺失");
         }
@@ -327,7 +332,7 @@ public class AccountService {
         return password;
     }
 
-    static String normalizeDisplayName(String displayName, String handle) {
+    public static String normalizeDisplayName(String displayName, String handle) {
         String value = displayName == null ? "" : displayName.strip();
         if (value.isEmpty()) {
             // 默认取 handle：展示名为空会让客户端在会话列表里显示一片空白。

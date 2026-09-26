@@ -127,9 +127,15 @@ CREATE TABLE IF NOT EXISTS `actor` (
 -- 是哪个 Actor。没有这个唯一索引，每次鉴权都会变成 actor_secret 的全表扫描 ——
 -- 而 actor_secret 是全库唯一一张「每行都对应一个账号」的表，
 -- 长连接场景下它是被查得最频繁的表之一。
+--
+-- 同一张表承载三类凭据（见 secret_type），因为它们的生命周期、轮换方式与
+-- 「谁能读到」完全一致：都是「只有平台自己能读，对外只给一次明文」。
+-- 唯一的例外是 WEBHOOK_SECRET：它必须能被**读回明文**才能用于签名
+-- （HMAC 的密钥不能是哈希），所以 secret_hash 列里那一行实际存的是明文 ——
+-- 这一点写在 SecretType 的注释里，也写在 02-auth.md §3.1。
 CREATE TABLE IF NOT EXISTS `actor_secret` (
   `actor_id`      BIGINT       NOT NULL,
-  `secret_type`   TINYINT      NOT NULL                COMMENT '1=密码哈希 2=API_KEY哈希',
+  `secret_type`   TINYINT      NOT NULL                COMMENT '1=密码哈希 2=API_KEY哈希 3=WEBHOOK密钥(明文,需用于签名)',
   `secret_hash`   VARCHAR(255) NOT NULL,
   `last_used_at`  DATETIME(3)  NULL,
   PRIMARY KEY (`actor_id`, `secret_type`),

@@ -283,12 +283,21 @@ class FriendServiceTest {
         assertThat(outgoing.items().get(0).friendship().getRequestId())
                 .isEqualTo(friendships.get(ALICE, BOB).getRequestId());
         assertThat(outgoing.items().get(0).incoming()).isFalse();
+        assertThat(outgoing.items().get(0).from().getId())
+                .as("from 是发起人（不是「id 较小的那个人」）")
+                .isEqualTo(ALICE);
+        assertThat(outgoing.items().get(0).to().getId()).isEqualTo(BOB);
 
         var incoming = service.listRequests(ALICE, true, true, 50, null);
         assertThat(incoming.items()).as("carol 的请求已过期，pending 视图里不该出现").isEmpty();
 
         var all = service.listRequests(ALICE, true, false, 50, null);
         assertThat(all.items()).as("status=all 不过滤过期").hasSize(1);
+        assertThat(all.items().get(0).from().getId())
+                .as("carol 发起的，而 carol 的 id 更大：方向不能取「id 小的那个」")
+                .isEqualTo(CAROL);
+        assertThat(all.items().get(0).to().getId()).isEqualTo(ALICE);
+        assertThat(all.items().get(0).incoming()).isTrue();
     }
 
     @Test

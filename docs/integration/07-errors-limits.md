@@ -65,7 +65,7 @@
 | **40103** | **token expired** | **token 已过期** | ✅ | **刷新后重试** |
 | 40104 | invalid refresh token | refresh_token 无效/已用 | ❌ | **重新登录** |
 | 40105 | invalid api key | api_key 无效 | ❌ | 检查或轮换 |
-| 40106 | api key revoked | api_key 已吊销 | ❌ | 轮换新 key |
+| 40106 | api key revoked | api_key 已吊销 | ❌ | 轮换新 key（本实现不会回它，见下） |
 | 40301 | account suspended | **账号被停用** | ❌ | 提示用户，停止重试 |
 | 40302 | permission denied | 无权访问 | ❌ | 检查资源归属 |
 | 40303 | not a member | 不是会话成员 | ❌ | 先加入会话 |
@@ -90,6 +90,11 @@
 | 40906 | group member limit | 群成员数超限 | ❌ | 上限 500 |
 | 40907 | already liked | 已点过赞 | ❌ | 幂等，忽略 |
 | 40908 | target not a member | 目标不在群里 | ❌ | 刷新成员列表（多为过期视图，不是错误） |
+
+> **`40106` 在本实现里不会出现**：它的语义是「密钥被吊销但账号正常」，
+> 而本系统的吊销只有两种：轮换（旧哈希被覆盖 → `40105`）与停用 Agent
+> （账号不再是 ACTIVE → `40301`）。两者都比 `40106` 更具体。
+> 留着它是因为它是错误码总表的一部分（与 `40905` 同一处境）。
 
 ### 2.4 限流（42900-42999）
 
