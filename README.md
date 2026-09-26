@@ -79,9 +79,10 @@ uv run --with protobuf --with pyyaml --with sqlglot python tools/verify_all.py
 
 `--quick` 跳过耗时的 `docs` / `mutate` / `mutate-deps` / `mutate-cfg` / `mutate-cmd` / `mutate-member`。
 
-另有 4 项需要外部 MySQL/Redis（`runtime-cfg` = 运行时配置是否与当前
-`local-conn.env` 一致，`collation` = 实测服务端排序规则等价性，`mutate-cluster` = 集群路由的
-13 条规则，`mutate-member-tx` = 转让群主的事务性），用 `--services` 打开：
+另有 5 项需要外部 MySQL/Redis（`runtime-cfg` = 运行时配置是否与当前
+`local-conn.env` 一致，`schema-drift` = 库结构与 DDL 是否一致，`collation` = 实测服务端排序规则等价性，
+`mutate-cluster` = 集群路由的 13 条规则，`mutate-member-tx` = 转让群主的事务性），
+用 `--services` 打开：
 
 ```bash
 uv run --with protobuf --with pyyaml --with sqlglot --with pymysql \
@@ -99,8 +100,30 @@ uv run --with protobuf --with pyyaml --with sqlglot --with pymysql \
 ```bash
 python tools/gen_schema.py              # 重新生成
 python tools/gen_schema.py --check      # 校验已生成文件是否为当前定义
+python tools/gen_entities.py            # 由 DDL 反向生成实体与枚举
 uv run --with sqlglot python tools/verify_schema.py   # 深度校验
 ```
+
+> 三条命令的顺序是固定的：**改生成器 → 重跑两个生成器 → 迁库**（下面那条）。
+> 实体是**反向生成**的（从 DDL 读出来），所以它不会漂：漏跑 `gen_entities.py`
+> 会让实体缺字段，而那种缺陷在编译期就消失（字段只是不存在，MyBatis 照样跑），
+> 表现为「某个字段永远是 null」——由 `gen_entities.py --check` 拦在 CI 里。
+
+### 结构变更怎么落到已存在的库上
+
+建表脚本里的每条语句都是 `CREATE TABLE IF NOT EXISTS`。这对「从零建库」是正确的，
+对「加一列」则**什么都不做**——而报错只会在真正用到那一列时出现：
+`Unknown column 'friendship.request_id' in 'field list'`，看起来像业务代码写错了字段名。
+
+```bash
+python tools/migrate_schema.py --dry-run                    # 看要做什么（不连库）
+uv run --with pymysql python tools/migrate_schema.py --apply # 真的迁
+uv run --with pymysql python tools/migrate_schema.py --check # 只查偏差（verify_all --services 会跑）
+```
+
+它只生成 `ADD COLUMN` / `ADD KEY` / `CREATE TABLE`：**没有 DROP、没有 MODIFY**。
+删列与改类型是破坏性的（数据会没），必须由人显式决定，所以「库里有、DDL 里没有」
+的列与索引只报 WARN 并列出建议语句。默认 dry-run，`--apply` 才连库。
 
 校验器经过**变异测试**（`tools/mutate_schema.py`）：向正确的建表脚本里注入 14 类真实错误，
 断言每一类都被拦下。为什么需要它——一个只会输出 OK 的校验器，和一个什么都抓不到的校验器，
@@ -418,6 +441,47 @@ MockMvc 里那层 Jackson 是测试自己装的，所以这条由 `ConversationH
 不是加好友流程——所以每个用例自己注册一个「对手」并直接写一行 `friendship`，
 而不是让两个功能纠缠在一起（否则失败时分不清是哪一半坏了）。
 
+### 好友（M5）：一次加好友只有一行记录
+
+`POST /v1/friends/requests`、`.../accept`、`.../reject`、`GET /v1/friends/requests`、
+`GET /v1/friends`、`DELETE /v1/friends/{id}`、`POST/DELETE /v1/friends/{id}/block`
+已实现（§3.1–§3.6）。
+
+最值得记的是**请求的生命周期与关系的状态在同一行上**（`friendship.status`）：从 PENDING 开始，
+被接受后变成 ACCEPTED，或被删除（拒绝/过期）。方案对比：
+
+| 做法 | 后果 |
+|---|---|
+| 「friend_request 表 + friendship 表」两张表 | 「请求被接受了」与「关系存在」是两次写入，中间任何一次失败或并发交错都会留下「请求说已接受、关系表说不是好友」——**用户明明同意了，对方却发不出消息**（40003），重试无法自愈 |
+| 一行 + `status` | 只有一个地方能表示关系，不存在不一致的两份事实。代价是「拒绝」只能靠删除表达（没有「已拒绝」这个状态），而那正好是想要的：删除之后双方都能干净地重来 |
+
+几处「更简单的写法能跑通、只是会错」的取舍：
+
+| 决定 | 不这么做会怎样 |
+|---|---|
+| 过期的 PENDING **按不存在处理**（比较 `expires_at`），而不是先跑一个清理任务 | 清理任务带来一个新的失败模式：「任务没跑起来时行为就变了」。而覆盖它只需一次 writes——下一次同一对人再请求时 |
+| 「重新发起」把那一行**整个换成新请求**（含 `request_id` / `created_at`） | 保留旧 `request_id` 时，响应会给客户端一个**库里不存在**的新 id，而用它去 accept 也能成功（按旧 id 也查得到）——两边各自“能用”，只是它们说的不是同一个请求。这条是 `FriendHttpIT` 跑出来的 |
+| 同意**幂等**且返回同一个 `conv_id` | §3.5 的重试表把「同意好友请求」列为可安全重试；回一个「已经同意了」的错误会把一次成功的操作当成失败 |
+| 删除时（拒绝）**不保留历史** | 保留就得回答「这行是待处理还是被拒过」，而被拒的一方重新发起时又要被区别对待 |
+| 删好友**幂等**（`removed=false`），而踢群成员目标不在群里回 `40908` | 两者的客户端目标状态不同：踢人是「让这个人不在群里」，删好友的目标（我们不再是好友）已经成立了。而且删好友只能删自己的，不存在「拼错别人的 id 却以为删成功」 |
+| 拉黑**复用同一行**改成 BLOCKED | 分两个概念（不再是好友 vs 不许加我）就得在每个读取点各自处理「他是好友但被拉黑了」这个组合 |
+| 解除拉黑只删 BLOCKED 的行 | 当前是 ACCEPTED 时照删，会让一次「解除拉黑」悄悄删除一段真实的好友关系 |
+| 列表分页的游标是 `(updated_at, request_id)`，而**不是**「对方的 actor_id」 | 关系存的是无序对，对方可能在 `actor_a` 也可能在 `actor_b`——同一个谓词在两个方向长得不一样，而分页谓词必须两边一致。`request_id` 是每一行自己的列（而且它是唯一索引），两个方向用同一个式子 |
+| 分页谓词随手带上括号 | 生成器把 `AND (a OR b)` 写成 `AND a OR b` 时语义变成「满足 a 的全部，或满足 b 的全部」——一个看起来正常、只多返回一批数据的查询 |
+
+**日配额分两档**（人类 50 / Agent 100，与 07-errors-limits §3.1 的维度表一致），
+判据是 `actor_type`——这是「展示元数据之外的合法读取点」之一，
+因为它决定的是**策略参数**（配额），而不是「谁有权限做什么」。
+
+好友集缓存（DESIGN §11.6 里的 `tm:friend:*`）**刻意没做**：它要连带解决跨节点失效
+（一个节点的缓存删不掉另一个节点的），而那是一个独立的问题；
+当前的取舍是「每次回源数据库」——它一定正确。
+
+验证：`FriendServiceTest`（21 用例，规则与错误码）+
+`FriendHttpIT`（8 用例，真实 MySQL：分页不重不漏、游标贴错回 40010、
+**删好友之后单聊真的发不出去（40003）而历史仍读得到**、拉黑是 40304 而不是 40003）。
+后者是第一批「不再自己造 friendship 行」的消息类验证。
+
 ### 图片（M4）：两种「看起来更简单」的错做法
 
 `POST /v1/media`、`GET /v1/media/{id}`（含 `?thumb=1`）已实现（§5）。
@@ -527,9 +591,9 @@ S→C  payload = SyncResponse    // 「给你补消息」
 收不到推送，它们靠重连后的 SYNC 补齐（这正是上面那条路径存在的意义）。
 归档/清理任务也还没做，所以 `SyncResponse.truncated` 目前恒为 `false`（§6.4 解释了为什么不猜）。
 
-REST 侧已做完「能登录」与「能开会话、发消息、翻历史、管成员、收发图片」（见 README 的「账号与令牌」
-「会话与消息」「图片」三节），还没做的是：好友（§3）、广场（§6）、Agent 管理（§7），
-以及用户端 Vue 脚手架（M3 验收标准的最后一步）。
+REST 侧已做完「能登录」「能开会话、发消息、翻历史、管成员、收发图片」「加好友」
+（见 README 的「账号与令牌」「会话与消息」「好友」「图片」四节），
+还没做的是：广场（§6）、Agent 管理（§7），以及用户端 Vue 脚手架（M3 验收标准的最后一步）。
 
 > `docs/integration/03-rest-api.md` 里与代码对齐过的地方（已改文档而非改代码）：
 > ① §4.5 的错误表原写「`40400` 会话不存在」与「`40302` 已被对方拉黑」，而实现回的是

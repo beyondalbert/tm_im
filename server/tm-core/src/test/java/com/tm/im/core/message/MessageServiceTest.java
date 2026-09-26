@@ -854,8 +854,40 @@ class MessageServiceTest {
         }
 
         @Override
+        public boolean delete(long actorX, long actorY) {
+            return statuses.remove(key(actorX, actorY)) != null;
+        }
+
+        @Override
+        public Optional<Friendship> findByRequestId(long requestId) {
+            throw new UnsupportedOperationException();
+        }
+
+        @Override
         public List<Long> listFriendIds(long actorId, int limit) {
             return List.of();
+        }
+
+        /*
+         * 三个列表/统计方法在这里是「不支持」而**不是**返回空集合。
+         * 差异很关键：返回空集合会让一个「本类没实现的查询」表现成
+         * 「这个账号没有好友」，而测试会因为“空列表也是合法结果”而变绿——
+         * 发消息路径根本不调它们，所以这里用异常把这种误用当场暴露。
+         */
+        @Override
+        public List<Friendship> pageFriends(long actorId, Cursor cursor, int limit) {
+            throw new UnsupportedOperationException();
+        }
+
+        @Override
+        public List<Friendship> pageRequests(long actorId, FriendshipStatus status,
+                                             Boolean initiatedByMe, Cursor cursor, int limit) {
+            throw new UnsupportedOperationException();
+        }
+
+        @Override
+        public int countInitiatedSince(long actorId, LocalDateTime since) {
+            throw new UnsupportedOperationException();
         }
 
         /** 与仓储实现同口径：关系按无序对存储，参数必须归一化。 */

@@ -20,12 +20,12 @@ import java.util.Optional;
  * 手写替身把这些状态直接暴露成字段，读起来就是一句话（与 {@code MessageServiceTest}
  * 里那套替身同一取舍）。
  */
-class InMemoryActors implements ActorRepository {
+public class InMemoryActors implements ActorRepository {
 
     private final Map<Long, Actor> byId = new LinkedHashMap<>();
 
     /** 造一个人：id 与 handle 都由调用方给，避免测试里到处拼 handle 字符串。 */
-    Actor put(long id, String handle) {
+    public Actor put(long id, String handle) {
         Actor actor = new Actor();
         actor.setId(id);
         actor.setHandle(handle);

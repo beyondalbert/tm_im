@@ -16,7 +16,7 @@ import java.util.Objects;
 import java.util.Optional;
 
 /** 内存版会话仓储。语义与 {@code ConversationRepositoryImpl} 对齐（幂等、原子建群、只前进的已读游标）。 */
-class InMemoryConversations implements ConversationRepository {
+public class InMemoryConversations implements ConversationRepository {
 
     private final Map<Long, Conversation> conversations = new LinkedHashMap<>();
     private final Map<Long, List<ConversationMember>> members = new LinkedHashMap<>();
@@ -29,12 +29,12 @@ class InMemoryConversations implements ConversationRepository {
     boolean failNextTransferOwnership;
     long seqCounter;
 
-    void put(Conversation conversation) {
+    public void put(Conversation conversation) {
         conversations.put(conversation.getId(), conversation);
         members.putIfAbsent(conversation.getId(), new ArrayList<>());
     }
 
-    void putMember(long convId, long actorId, MemberRole role, long lastReadSeq) {
+    public void putMember(long convId, long actorId, MemberRole role, long lastReadSeq) {
         ConversationMember member = new ConversationMember();
         member.setConvId(convId);
         member.setActorId(actorId);
@@ -45,18 +45,18 @@ class InMemoryConversations implements ConversationRepository {
         members.computeIfAbsent(convId, k -> new ArrayList<>()).add(member);
     }
 
-    ConversationMember member(long convId, long actorId) {
+    public ConversationMember member(long convId, long actorId) {
         return members.getOrDefault(convId, List.of()).stream()
                 .filter(m -> m.getActorId() == actorId)
                 .findFirst()
                 .orElse(null);
     }
 
-    List<ConversationMember> rows(long convId) {
+    public List<ConversationMember> rows(long convId) {
         return List.copyOf(members.getOrDefault(convId, List.of()));
     }
 
-    List<String> calls() {
+    public List<String> calls() {
         return List.copyOf(calls);
     }
 

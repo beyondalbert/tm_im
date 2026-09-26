@@ -11,12 +11,12 @@ import java.util.List;
 import java.util.Optional;
 
 /** 内存版消息仓储（按 {@code (conv_id, seq)} 的语义实现倒序/升序两种取法）。 */
-class InMemoryMessages implements MessageRepository {
+public class InMemoryMessages implements MessageRepository {
 
     private final List<Message> stored = new ArrayList<>();
 
     /** 直接往「库里」放一条消息；seq 与时间都由调用方给，方便构造「活跃时间」用例。 */
-    Message put(long convId, long seq, long senderId, String text, LocalDateTime createdAt) {
+    public Message put(long convId, long seq, long senderId, String text, LocalDateTime createdAt) {
         Message message = new Message();
         message.setId(700_000_000_000_000_000L + seq);
         message.setConvId(convId);

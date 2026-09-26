@@ -1,4 +1,4 @@
-// 源: deploy/sql/01-schema.sql  sha256[:16]=0f7a217889590ceb
+// 源: deploy/sql/01-schema.sql  sha256[:16]=3b1df4f3ef040428
 package com.tm.im.storage.mapper;
 
 import com.baomidou.mybatisplus.core.mapper.BaseMapper;
@@ -6,7 +6,7 @@ import com.tm.im.domain.entity.Friendship;
 import org.apache.ibatis.annotations.Mapper;
 
 /**
- * 好友关系，无序对存储 的基础 CRUD。
+ * 好友关系（含请求生命周期），无序对存储 的基础 CRUD。
  *
  * <p>由 <code>tools/gen_entities.py</code> 生成，请勿手工编辑。
  * 复杂查询写在仓储实现里（用 Wrapper），不要往这里加自定义 SQL——

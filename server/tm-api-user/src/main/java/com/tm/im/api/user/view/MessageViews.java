@@ -108,6 +108,6 @@ public final class MessageViews {
     }
 
     private static java.time.Instant instant(LocalDateTime time, ZoneId databaseZone) {
-        return time == null ? null : time.atZone(databaseZone).toInstant();
+        return Timestamps.millis(time, databaseZone);
     }
 }

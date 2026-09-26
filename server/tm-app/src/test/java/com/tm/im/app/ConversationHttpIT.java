@@ -88,6 +88,9 @@ class ConversationHttpIT {
     FriendshipRepository friendships;
 
     @Autowired
+    com.tm.im.common.id.IdGenerator idGenerator;
+
+    @Autowired
     StringRedisTemplate redis;
 
     @Autowired
@@ -520,6 +523,10 @@ class ConversationHttpIT {
     private Account newFriend() {
         Account peer = newAccount("it_conv_p" + seq.incrementAndGet() + "_" + SUFFIX);
         Friendship friendship = new Friendship();
+        // request_id 必须由调用方给出（仓储不再自己造，见 FriendshipRepository.save 的注释）：
+        // 它是对外契约的一部分（accept/reject 按它定位）。本类不走 §3 的接口，
+        // 所以直接从容器里拿雪花号——真实路径里它由 FriendService 生成。
+        friendship.setRequestId(idGenerator.nextId());
         friendship.setActorA(Math.min(alice.actorId(), peer.actorId()));
         friendship.setActorB(Math.max(alice.actorId(), peer.actorId()));
         friendship.setInitiator(alice.actorId());

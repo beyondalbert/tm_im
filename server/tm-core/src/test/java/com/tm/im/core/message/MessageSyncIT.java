@@ -286,13 +286,24 @@ class MessageSyncIT {
         }
     }
 
+    /**
+     * 直接插一行「已是好友」（本类验的是发送/读取路径的权限规则，不是加好友流程）。
+     *
+     * <p>{@code request_id} 用 {@code min(a,b)} 占位：它是唯一索引，而在本类里
+     * 每一对 actor 都是本次运行新建的雪花号，所以这个值全局唯一。
+     * {@code expires_at} 对所有非 PENDING 的行都没有意义（列是 NOT NULL），
+     * 因此与 {@code created_at} 取同一个值——这正确反映了「它只在待处理时有意义」。
+     */
     private static void insertFriendship(Connection conn, long a, long b) throws SQLException {
         try (PreparedStatement ps = conn.prepareStatement(
-                "INSERT INTO friendship (actor_a, actor_b, status, initiator, updated_at)"
-                        + " VALUES (?,?,2,?,NOW(3))")) {
+                "INSERT INTO friendship"
+                        + " (request_id, actor_a, actor_b, status, initiator,"
+                        + "  created_at, expires_at, updated_at)"
+                        + " VALUES (?,?,?,2,?,NOW(3),NOW(3),NOW(3))")) {
             ps.setLong(1, Math.min(a, b));
-            ps.setLong(2, Math.max(a, b));
-            ps.setLong(3, a);
+            ps.setLong(2, Math.min(a, b));
+            ps.setLong(3, Math.max(a, b));
+            ps.setLong(4, a);
             ps.executeUpdate();
         }
     }

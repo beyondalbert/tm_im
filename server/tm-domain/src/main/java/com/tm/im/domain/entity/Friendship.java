@@ -1,4 +1,4 @@
-// 源: deploy/sql/01-schema.sql  sha256[:16]=0f7a217889590ceb
+// 源: deploy/sql/01-schema.sql  sha256[:16]=3b1df4f3ef040428
 package com.tm.im.domain.entity;
 
 import com.baomidou.mybatisplus.annotation.IdType;
@@ -9,7 +9,7 @@ import com.tm.im.domain.enums.FriendshipStatus;
 import java.time.LocalDateTime;
 
 /**
- * 好友关系，无序对存储
+ * 好友关系（含请求生命周期），无序对存储
  *
  * <p>由 <code>tools/gen_entities.py</code> 从 <code>deploy/sql/01-schema.sql</code> 生成，
  * 请勿手工编辑——改结构请改 DDL 生成器后重跑。
@@ -22,6 +22,9 @@ import java.time.LocalDateTime;
  */
 @TableName("friendship")
 public class Friendship {
+
+    /** 好友请求 id（雪花号）；accept/reject 按它定位 */
+    private Long requestId;
 
     /** 约定 actor_a < actor_b */
     // 联合主键之一，见类注释：故意不标 @TableId
@@ -36,7 +39,25 @@ public class Friendship {
     /** 发起方，用于展示「谁加的你」 */
     private Long initiator;
 
+    /** 请求附言（仅 PENDING 时有意义） */
+    private String message;
+
+    /** PENDING 的失效时间（ACCEPTED/BLOCKED 后保留原值，不再有意义） */
+    private LocalDateTime expiresAt;
+
+    /** 关系（或请求）建立时间 */
+    private LocalDateTime createdAt;
+
+    /** 最后一次状态变更时间；ACCEPTED 行的它就是 friends_since */
     private LocalDateTime updatedAt;
+
+    public Long getRequestId() {
+        return requestId;
+    }
+
+    public void setRequestId(Long requestId) {
+        this.requestId = requestId;
+    }
 
     public Long getActorA() {
         return actorA;
@@ -70,6 +91,30 @@ public class Friendship {
         this.initiator = initiator;
     }
 
+    public String getMessage() {
+        return message;
+    }
+
+    public void setMessage(String message) {
+        this.message = message;
+    }
+
+    public LocalDateTime getExpiresAt() {
+        return expiresAt;
+    }
+
+    public void setExpiresAt(LocalDateTime expiresAt) {
+        this.expiresAt = expiresAt;
+    }
+
+    public LocalDateTime getCreatedAt() {
+        return createdAt;
+    }
+
+    public void setCreatedAt(LocalDateTime createdAt) {
+        this.createdAt = createdAt;
+    }
+
     public LocalDateTime getUpdatedAt() {
         return updatedAt;
     }
@@ -85,10 +130,14 @@ public class Friendship {
     @Override
     public String toString() {
         return "Friendship{" +
+                "requestId=" + requestId + ", " +
                 "actorA=" + actorA + ", " +
                 "actorB=" + actorB + ", " +
                 "status=" + status + ", " +
                 "initiator=" + initiator + ", " +
+                "message=" + message + ", " +
+                "expiresAt=" + expiresAt + ", " +
+                "createdAt=" + createdAt + ", " +
                 "updatedAt=" + updatedAt
                 + '}';
     }

@@ -37,6 +37,8 @@ public final class PageCursors {
 
     private static final String TYPE_CONVERSATION = "conv";
     private static final String TYPE_MESSAGE = "msg";
+    private static final String TYPE_FRIEND = "friend";
+    private static final String TYPE_FRIEND_REQUEST = "freq";
 
     private PageCursors() {
     }
@@ -52,6 +54,56 @@ public final class PageCursors {
 
     /** 消息游标：上一页最后一条的 {@code seq}。下一个请求返回 {@code seq < 它} 的消息。 */
     public record MessageCursor(long seq) {
+    }
+
+    /**
+     * 社交类列表的游标（好友列表、好友请求列表）：{@code (updated_at, request_id)}。
+     *
+     * <p>两者形状相同但是<b>两个不同的类型</b>（{@code friend} 与 {@code freq}）：
+     * 它们来自两张不同的语义（「谁是好友」与「有哪些请求」），长得一样时贴错不会报错，
+     * 只会返回一个内容不对的列表——而客户端绝不会怀疑是游标贴错了。
+     * 这条取舍与会话/消息两种游标同源（见类注释）。
+     *
+     * <p>第二个字段是 {@code request_id} 而不是「对方的 actor_id」：
+     * 关系存的是无序对，对方可能在 {@code actor_a} 也可能在 {@code actor_b}，
+     * 而 {@code request_id} 是每一行自己的列，两个方向用的是同一个谓词（见仓储注释）。
+     */
+    public record SocialCursor(long updatedAtMillis, long requestId) {
+    }
+
+    /** 编码好友列表游标。 */
+    public static String encodeFriend(long updatedAtMillis, long requestId) {
+        return encodeSocial(TYPE_FRIEND, updatedAtMillis, requestId);
+    }
+
+    /** 编码好友请求列表游标。 */
+    public static String encodeFriendRequest(long updatedAtMillis, long requestId) {
+        return encodeSocial(TYPE_FRIEND_REQUEST, updatedAtMillis, requestId);
+    }
+
+    public static SocialCursor decodeFriend(String cursor) {
+        return decodeSocial(parse(cursor, TYPE_FRIEND), cursor);
+    }
+
+    public static SocialCursor decodeFriendRequest(String cursor) {
+        return decodeSocial(parse(cursor, TYPE_FRIEND_REQUEST), cursor);
+    }
+
+    private static String encodeSocial(String type, long updatedAtMillis, long requestId) {
+        return encode("{\"v\":" + VERSION + ",\"t\":\"" + type + "\""
+                + ",\"at\":" + updatedAtMillis + ",\"rid\":" + requestId + "}");
+    }
+
+    private static SocialCursor decodeSocial(JsonNode node, String cursor) {
+        long at = requireLong(node, "at", cursor);
+        long rid = requireLong(node, "rid", cursor);
+        if (at < 0) {
+            throw invalid(cursor, "at（更新时间）为负");
+        }
+        if (rid <= 0) {
+            throw invalid(cursor, "rid（请求 id）必须为正整数");
+        }
+        return new SocialCursor(at, rid);
     }
 
     /**

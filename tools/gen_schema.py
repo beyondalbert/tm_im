@@ -236,16 +236,25 @@ def social_tables() -> str:
 
 -- 好友关系：约定 actor_a < actor_b，消除方向，避免存两份
 -- 这样「是否是好友」只需一次点查，且天然去重
+--
+-- 本表同时承载「请求」的生命周期（DESIGN §11.4：发起 → friendship(PENDING) → ACCEPTED）。
+-- 之所以不另开一张 friend_request 表：「谁是发起人」「当前是什么状态」这两件事
+-- 在两个表里各存一份就会不一致，而不一致的表现是「请求被接受了，但发消息仍说不是好友」。
 CREATE TABLE IF NOT EXISTS `friendship` (
-  `actor_a`    BIGINT      NOT NULL                  COMMENT '约定 actor_a < actor_b',
-  `actor_b`    BIGINT      NOT NULL,
-  `status`     TINYINT     NOT NULL                  COMMENT '1=PENDING 2=ACCEPTED 3=BLOCKED',
-  `initiator`  BIGINT      NOT NULL                  COMMENT '发起方，用于展示「谁加的你」',
-  `updated_at` DATETIME(3) NOT NULL,
+  `request_id` BIGINT       NOT NULL                  COMMENT '好友请求 id（雪花号）；accept/reject 按它定位',
+  `actor_a`    BIGINT       NOT NULL                  COMMENT '约定 actor_a < actor_b',
+  `actor_b`    BIGINT       NOT NULL,
+  `status`     TINYINT      NOT NULL                  COMMENT '1=PENDING 2=ACCEPTED 3=BLOCKED',
+  `initiator`  BIGINT       NOT NULL                  COMMENT '发起方，用于展示「谁加的你」',
+  `message`    VARCHAR(255) NULL                      COMMENT '请求附言（仅 PENDING 时有意义）',
+  `expires_at` DATETIME(3)  NOT NULL                  COMMENT 'PENDING 的失效时间（ACCEPTED/BLOCKED 后保留原值，不再有意义）',
+  `created_at` DATETIME(3)  NOT NULL                  COMMENT '关系（或请求）建立时间',
+  `updated_at` DATETIME(3)  NOT NULL                  COMMENT '最后一次状态变更时间；ACCEPTED 行的它就是 friends_since',
   PRIMARY KEY (`actor_a`, `actor_b`),
+  UNIQUE KEY `uk_request_id` (`request_id`),
   KEY `idx_b` (`actor_b`, `status`)                  COMMENT '反向查询',
   KEY `idx_initiator_status` (`initiator`, `status`)
-) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COMMENT='好友关系，无序对存储';
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COMMENT='好友关系（含请求生命周期），无序对存储';
 
 CREATE TABLE IF NOT EXISTS `post` (
   `id`         BIGINT      NOT NULL,

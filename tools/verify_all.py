@@ -60,6 +60,11 @@ CHECKS = [
 SERVICE_CHECKS = [
     ("runtime-cfg", "gen_runtime_config.py",
      "运行时配置与当前 local-conn.env 一致（--check）", "", ["--check"]),
+    # 建表脚本是 `CREATE TABLE IF NOT EXISTS`：对「从零建库」正确，对「加一列」什么都不做。
+    # 于是「改了生成器但没迁库」会造成一类只在**运行期**才暴露的偏差
+    # （Unknown column 'x'，看起来像业务代码写错了字段名）。它只能连库比出来。
+    ("schema-drift", "migrate_schema.py",
+     "库结构与 DDL 一致（--check；有偏差则列出待执行的 ALTER）", "pymysql", ["--check"]),
     ("collation",   "probe_collation.py",
      "实测服务端排序规则等价性（决定 handle 唯一性口径）", "pymysql", []),
     # 集群路由（tm:route / tm:node）的规则几乎只在「多实例 + 出故障」时才显形：

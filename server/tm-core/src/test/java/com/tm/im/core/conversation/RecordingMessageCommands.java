@@ -16,7 +16,7 @@ import java.util.List;
  * <p>{@code markRead} 会真的写到 {@link InMemoryConversations}：被验证的那条规则是
  * 「响应里的 last_read_seq 是<b>生效后</b>的值」，若替身只记一笔，那条规则就永远测不出差异。
  */
-class RecordingMessageCommands implements MessageCommandPort {
+public class RecordingMessageCommands implements MessageCommandPort {
 
     private final InMemoryConversations conversations;
     private final List<MessageService.SendCommand> sent = new ArrayList<>();
@@ -26,11 +26,11 @@ class RecordingMessageCommands implements MessageCommandPort {
 
     int markReadCalls;
 
-    RecordingMessageCommands(InMemoryConversations conversations) {
+    public RecordingMessageCommands(InMemoryConversations conversations) {
         this.conversations = conversations;
     }
 
-    List<MessageService.SendCommand> sent() {
+    public List<MessageService.SendCommand> sent() {
         return List.copyOf(sent);
     }
 

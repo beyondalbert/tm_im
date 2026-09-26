@@ -31,6 +31,6 @@ public final class ActorViews {
                 actor.getStatus() == null ? 0 : actor.getStatus().code(),
                 // createdAt 在库里是 NOT NULL，但手工插入的数据或用例构造的实体可能为 null。
                 // 这里允许 null 而不是抛：一个空的时间字段不该让整个「查我是谁」失败。
-                actor.getCreatedAt() == null ? null : actor.getCreatedAt().atZone(databaseZone).toInstant());
+                Timestamps.millis(actor.getCreatedAt(), databaseZone));
     }
 }

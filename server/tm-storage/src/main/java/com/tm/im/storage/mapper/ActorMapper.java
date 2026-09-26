@@ -1,4 +1,4 @@
-// 源: deploy/sql/01-schema.sql  sha256[:16]=0f7a217889590ceb
+// 源: deploy/sql/01-schema.sql  sha256[:16]=3b1df4f3ef040428
 package com.tm.im.storage.mapper;
 
 import com.baomidou.mybatisplus.core.mapper.BaseMapper;
