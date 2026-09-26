@@ -4,16 +4,23 @@ import com.tm.im.channel.cluster.ActorRouteTable;
 import com.tm.im.channel.cluster.ClusterAwareConnectionRegistry;
 import com.tm.im.channel.cluster.NodeIdentity;
 import com.tm.im.channel.cluster.NodeProperties;
+import com.tm.im.channel.cluster.RedisPushBus;
 import com.tm.im.channel.codec.Frames;
+import com.tm.im.channel.codec.TransportMessageMapper;
+import com.tm.im.channel.push.ClusterMessagePushPort;
+import com.tm.im.channel.push.LocalMessagePushPort;
 import com.tm.im.channel.registry.LocalConnectionRegistry;
 import com.tm.im.channel.session.ConnectionRegistry;
 import com.tm.im.common.error.ErrorCode;
+import com.tm.im.core.channel.MessagePushPort;
 import io.netty.channel.Channel;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.boot.context.properties.EnableConfigurationProperties;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
+import org.springframework.data.redis.connection.RedisConnectionFactory;
+import org.springframework.data.redis.core.StringRedisTemplate;
 
 import java.util.concurrent.ArrayBlockingQueue;
 import java.util.concurrent.RejectedExecutionException;
@@ -87,6 +94,39 @@ public class ChannelConfiguration {
     @Bean
     public ConnectionRegistry connectionRegistry(ActorRouteTable routeTable) {
         return new ClusterAwareConnectionRegistry(new LocalConnectionRegistry(), routeTable);
+    }
+
+    /**
+     * 跳节点推送总线（DESIGN §7.4）。
+     *
+     * <p>它<b>自己</b>是 {@link org.springframework.context.SmartLifecycle}（相位 400）：
+     * 若交给 {@code RedisMessageListenerContainer} 自己的生命周期，订阅会在 Netty
+     * 已经接受连接（相位 1000）之后才建立，而中间那一段窗口里别的节点已经能把帧
+     * 投到本频道上。
+     */
+    @Bean
+    public RedisPushBus redisPushBus(RedisConnectionFactory connectionFactory,
+                                    StringRedisTemplate redis,
+                                    NodeIdentity self,
+                                    ConnectionRegistry registry) {
+        return new RedisPushBus(connectionFactory, redis, self, registry::push);
+    }
+
+    /**
+     * 推送网关：本地直写 + 跳节点转发（见 {@link ClusterMessagePushPort}）。
+     *
+     * <p>容器里只暴露这一个 {@code MessagePushPort}：本地实现自己不再声明为 Bean
+     * （否则按类型注入会有两个候选），这样「先本地、再跨节点」这条顺序
+     * 就不可能被某处绕过去。
+     */
+    @Bean
+    public MessagePushPort messagePushPort(ConnectionRegistry registry,
+                                          ActorRouteTable routes,
+                                          RedisPushBus bus,
+                                          NodeIdentity self,
+                                          TransportMessageMapper mapper) {
+        return new ClusterMessagePushPort(new LocalMessagePushPort(registry, mapper),
+                registry, routes, bus, self, mapper);
     }
 
     /**

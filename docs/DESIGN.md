@@ -415,7 +415,7 @@ IO 线程：解码 → 鉴权 → 组装任务 → 扔进 businessGroup → 立�
 ```
 1. 节点 A 处理发送，目标 Actor 在节点 B
 2. A 查 Redis 路由得 nodeId = B
-3. A 向频道 tm:push:{B} 发消息
+3. A 向频道 tm:push:{B} 发一帧（v1: {"actorId":..,"from":..,"frame":"<base64 的整帧>"}）
 4. 只有 B 订阅该频道 → 收到后查本地连接表 → 写 Channel
 ```
 
@@ -426,7 +426,8 @@ IO 线程：解码 → 鉴权 → 组装任务 → 扔进 businessGroup → 立�
 | 本地连接表 | 已实现：`LocalConnectionRegistry`（一个 Actor 在本节点一条连接，新连接顶旧的并回 `CMD_KICK`） |
 | 全局路由 | 已实现：`tm:route:{actorId}` → nodeId，跟随连接生命周期自动发布/释放 |
 | 节点注册与探活 | 已实现：`tm:node:{nodeId}` + TTL + 心跳（`tm.node.ttl` / `tm.node.heartbeat-seconds`） |
-| 跨节点投递 `tm:push:{nodeId}` | **未实现**：目标 Actor 不在本节点时推送返回 0（消息已落库，等对方重连后按 `last_seq` 走 SYNC 补齐） |
+| 跨节点投递 `tm:push:{nodeId}` | 已实现：本节点没有连接时查路由并向目标节点的频道发布一帧；目标不在线时返回 0（消息已落库，等对方重连后按 `last_seq` 走 SYNC 补齐） |
+| 跨节点投递的时序 | 订阅相位 **400** < 节点探活 **500** < Netty 接受连接 **1000**：先能收、再宣布自己活着、最后才有连接可投 |
 
 两条容易被改错、且都有变异测试钉住的实现约定（`tools/mutate_cluster_routing.py`）：
 
@@ -870,7 +871,7 @@ Client → CMD_SYNC{cursors:[(conv_id, since_seq)], limit}
 | 会话 seq 计数 | `tm:seq:{convId}` | STRING + INCR |
 | 会话成员集 | `tm:conv:{convId}:members` | SET |
 | 幂等短路 | `tm:idem:{convId}:{senderId}:{clientMsgId}` | STRING + TTL |
-| 跨节点推送 | `tm:push:{nodeId}` | PUB/SUB（未实现，见 §7.4 实现状态） |
+| 跨节点推送 | `tm:push:{nodeId}` | PUB/SUB（每个节点只订阅自己的；载荷见 §7.4） |
 | 限流 | `tm:rl:{actorId}:{window}` | STRING + INCR + EXPIRE |
 | 广场热 feed | `tm:feed:{actorId}` | ZSET |
 | 未读数 | `tm:unread:{actorId}` | HASH |
@@ -1175,7 +1176,7 @@ M3 的验收标准是「浏览器双开互发文字，seq 严格递增」。它�
 | 图片的用户维度（签名 URL、配额、清理任务） | **未实现** | 当前 `media_id` 即能力（见 03-rest-api §5.2）；`tm.storage.type` 只实现了 `local`，配成 `oss` 会在启动时失败而不是静默降级 |
 | 广场（§6）/ Agent 管理（§7） | **未实现** | — |
 | 用户端 Vue 脚手架 | **未实现** | M3 验收标准的最后一步 |
-| 跨节点投递 `tm:push:{nodeId}` | **未实现** | 见 §7.4 |
+| 跨节点投递 `tm:push:{nodeId}` | 已实现 | `ClusterMessagePushPortTest`（6 用例，网关的四条决策）+ `PushBusRedisIT`（4 用例，真实 Redis：只有目标节点收到、帧逐字节相同、脏载荷只跳过）+ `mutate_cluster_routing.py`（17 个变异，含跳节点推送的 4 条） |
 | 列表按「最近活跃」排序的成本 | **已知且待优化** | 每个会话一次点查（`conversation` 没有 `last_message_at` 列）。修法：给 `conversation_member` 加 `last_activity_at` 并建索引，但那是 DDL 变更（生成器 + 实体 + 迁移），所以本轮选择「先正确、再优化」，并在会话数超过 200 时打 WARN |
 | 会话列表/消息里的 `updated_at` | **与文档的一处差异** | §4.3 的 `updated_at` 实现为「最后一条消息的时间（无消息则是会话创建时间）」，因为表里没有那一列；语义与文档一致，只是不存在于库里 |
 

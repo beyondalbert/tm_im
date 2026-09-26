@@ -1,6 +1,6 @@
 #!/usr/bin/env python
 # -*- coding: utf-8 -*-
-"""给「集群路由与节点探活」做变异测试：把每条规则逐一改坏，看测试是否必然失败。
+"""给「集群路由 / 节点探活 / 跳节点推送」做变异测试：把每条规则逐一改坏，看测试是否必然失败。
 
 为什么需要它
     这一层（DESIGN §7.4：tm:route / tm:node / 心跳）的规则几乎都是
@@ -12,7 +12,11 @@
         发送方还报告推送成功；
       * 续期失败后不重新注册 —— Redis 抖动一次，本节点就永远是「死的」；
       * 解绑不带 CAS —— 换节点重连时旧节点删掉新绑定，同样无法自愈；
-      * 路由发布/释放时把 Redis 异常抛出去 —— 一次 Redis 抖动放大成「全站登不上」。
+      * 路由发布/释放时把 Redis 异常抛出去 —— 一次 Redis 抖动放大成「全站登不上」；
+      * 跳节点推送（tm:push:{nodeId}）不查路由 —— 它静默消失，只在多实例部署时表现为
+        「对方要等重连才看得到消息」；
+      * 订阅相位晚于 Netty —— 从「宣布存活」到「订阅完成」之间投来的帧全部丢失；
+      * 脏载荷把监听线程弄死 —— 一条读不懂的消息让整个节点的跳节点推送永久失效。
 
     这些都属于「改坏了照样能跑、而且看起来更正常」那一类，只能靠测试钉住；
     而测试本身也需要被验证——一个永远绿的测试与没有测试等价。
@@ -33,8 +37,8 @@
     每个变异都必须让「它该触发的那个用例」失败。用例名变了说明钉住这条规则的测试没了。
 
 用法
-    uv run python tools/mutate_cluster_routing.py            # 全部（含需要真实 Redis 的 5 条）
-    uv run python tools/mutate_cluster_routing.py --unit-only # 只跑不需要外部服务的 8 条
+    uv run python tools/mutate_cluster_routing.py            # 全部 17 条（其中 6 条需要真实 Redis）
+    uv run python tools/mutate_cluster_routing.py --unit-only # 只跑不需要外部服务的 11 条
     uv run python tools/mutate_cluster_routing.py 顶号        # 只跑名字里含该串的变异
 """
 
@@ -55,6 +59,8 @@ HEARTBEAT = "server/tm-channel/src/main/java/com/tm/im/channel/cluster/NodeHeart
 NODE_REGISTRY = "server/tm-channel/src/main/java/com/tm/im/channel/cluster/RedisNodeRegistry.java"
 ROUTE_TABLE = "server/tm-channel/src/main/java/com/tm/im/channel/cluster/RedisActorRouteTable.java"
 CLUSTER_KEYS = "server/tm-channel/src/main/java/com/tm/im/channel/cluster/ClusterKeys.java"
+PUSH_BUS = "server/tm-channel/src/main/java/com/tm/im/channel/cluster/RedisPushBus.java"
+PUSH_PORT = "server/tm-channel/src/main/java/com/tm/im/channel/push/ClusterMessagePushPort.java"
 
 # 临时工作区只需要这两个目录：proto 是 tm-channel 的 protoSourceRoot（../../proto）。
 COPY = ["server", "proto"]
@@ -67,10 +73,13 @@ MUTATION_TIMEOUT_SEC = 1800
 # 每条变异的 (测试选择器, 是否需要真实 Redis)
 UNIT_SELECTOR = ("ClusterAwareConnectionRegistryTest,NodeHeartbeatTest,NodePropertiesTest", False)
 IT_SELECTOR = ("ClusterRedisIT", True)
+# 跳节点推送那几条：单元侧（网关决策 + 载荷编解码 + 相位）与集成侧（真实 Redis）各一个
+PUSH_UNIT = ("ClusterMessagePushPortTest,PushEnvelopeTest,RedisPushBusPhaseTest", False)
+PUSH_IT = ("PushBusRedisIT", True)
 
 
 def _needs_redis(selector: str) -> bool:
-    return selector == IT_SELECTOR[0]
+    return selector in (IT_SELECTOR[0], PUSH_IT[0])
 
 
 def _replace_once(text: str, old: str, new: str) -> str:
@@ -216,6 +225,58 @@ MUTATIONS = [
         lambda t: _replace_once(t, 'private static final String ROUTE_PREFIX = "tm:route:";',
                                 'private static final String ROUTE_PREFIX = "tm:routes:";'),
         IT_SELECTOR, "locateReturnsSelfWithoutConsultingLiveness",
+    ),
+    (
+        "跳节点推送不再查路由",
+        "网关在「本节点没有该连接」时直接返回 0，不再查 tm:route："
+        "跳节点推送静默消失（本地推送一切正常、消息也落了库），"
+        "只在多实例部署时表现为「对方要等重连才看得到消息」",
+        PUSH_PORT,
+        lambda t: _replace_once(t, """        Optional<String> holder = routes.locate(actorId);
+        if (holder.isEmpty()) {
+            return 0;
+        }""", """        Optional<String> holder = routes.locate(actorId);
+        if (true) {
+            return 0;
+        }"""),
+        PUSH_UNIT, "remoteRouteIsPublished",
+    ),
+    (
+        "陈旧路由被当成在别的节点",
+        "去掉「路由指向本节点」的判断：一条连接已断但解绑失败留下的陈旧路由，"
+        "会让本节点往自己的频道投一帧 —— 一次无用的 Redis 往返，"
+        "而收件人（自己）也只能发现「本节点没有那条连接」",
+        PUSH_PORT,
+        lambda t: _replace_once(t, """        if (holder.get().equals(self.nodeId())) {""",
+                                """        if (false) {"""),
+        PUSH_UNIT, "staleRouteToSelfIsNotPublished",
+    ),
+    (
+        "推送总线订阅晚于 Netty",
+        "把订阅的相位调到 NettyServer(1000) 之后：从「宣布本节点存活」到「订阅完成」"
+        "之间投过来的帧全部丢失，而两端日志都干净（发布成功、接收方无异常）",
+        PUSH_BUS,
+        lambda t: _replace_once(t, "    static final int PHASE = 400;",
+                                "    static final int PHASE = 1500;"),
+        PUSH_UNIT, "subscribesBeforeNodeAnnouncesAndServerAccepts",
+    ),
+    (
+        "脏载荷把监听线程弄死",
+        "解析失败的载荷不再跳过而是直接取 get()：频道上一条读不懂的消息"
+        "（滚动升级期间的新旧版本、或人工写进去的脏数据）会让整个节点的"
+        "跨节点推送永久失效 —— 而它是一条只影响多实例的、静默的功能消失",
+        PUSH_BUS,
+        lambda t: _replace_once(t, """        Optional<PushEnvelope> envelope = PushEnvelope.parse(payload);
+        if (envelope.isEmpty()) {
+            unreadable.incrementAndGet();
+            log.warn("跨节点推送载荷无法解析（版本不一致或脏数据？），已跳过。payload={}",
+                    payload == null ? "<null>" : payload.substring(0, Math.min(120, payload.length())));
+            return;
+        }""", """        Optional<PushEnvelope> envelope = PushEnvelope.parse(payload);
+        if (false) {
+            return;
+        }"""),
+        PUSH_IT, "garbagePayloadIsSkipped",
     ),
 ]
 

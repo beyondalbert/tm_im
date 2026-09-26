@@ -16,8 +16,13 @@ import com.tm.im.domain.entity.Message;
  * 换载体）就会牵动业务代码。转换只发生在 tm-channel 一侧。
  *
  * <p><b>实现约定</b>：本节点没有该 actor 的连接时返回 0 而不是抛异常——
- * 「对方离线」是正常情况而非错误。跨节点投递（Redis 路由 + Pub/Sub）
- * 属于后续实现，调用方不应依赖「返回值 &gt; 0 才算成功」。
+ * 「对方离线」是正常情况而非错误。
+ *
+ * <p><b>返回值的语义是「已投出」，不是「已送达」</b>：跨节点那一路返回 1 只表示
+ * 「已发布给持有该连接的那个节点」（DESIGN §7.4 的 {@code tm:push:{nodeId}} 是
+ * fire-and-forget 的 Pub/Sub，目标节点不在线时那一帧就没了）。
+ * 调用方不应依赖「返回值 &gt; 0 才算成功」——真正的保障是「消息已落库 +
+ * 对方重连后按 {@code last_seq} 走 SYNC 补齐」。
  */
 public interface MessagePushPort {
 

@@ -4,18 +4,18 @@ import com.tm.im.channel.codec.TransportMessageMapper;
 import com.tm.im.channel.session.ConnectionRegistry;
 import com.tm.im.core.channel.MessagePushPort;
 import com.tm.im.domain.entity.Message;
-import org.springframework.stereotype.Component;
 
 /**
  * {@link MessagePushPort} 的本节点实现。
  *
  * <p>M2 只做本节点投递：{@code registry.push} 在注册表里查 actorId，
- * 命中则写 Channel。跨节点投递（DESIGN §7.4 的 Redis 路由 + Pub/Sub）
- * 是后续实现，接口语义已经预留 —— 调用方本来就应当容忍返回 0
- * （「对方离线」与「对方在别的节点」对调用方是同一件事：
- * 消息已落库，等对方重连时走 SYNC 补齐）。
+ * 命中则写 Channel。
+ *
+ * <p><b>它不是容器里的那个 Bean</b>：容器里暴露的是
+ * {@link ClusterMessagePushPort}（本类 + Redis 路由 + Pub/Sub）。
+ * 这里做成普通类而不是 {@code @Component}，否则按类型注入会有两个候选，
+ * 应用启动即报歧义 —— 与 {@code LocalConnectionRegistry} 同一做法。
  */
-@Component
 public class LocalMessagePushPort implements MessagePushPort {
 
     private final ConnectionRegistry registry;

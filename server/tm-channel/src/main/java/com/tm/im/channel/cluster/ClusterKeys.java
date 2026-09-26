@@ -13,6 +13,7 @@ final class ClusterKeys {
 
     private static final String ROUTE_PREFIX = "tm:route:";
     private static final String NODE_PREFIX = "tm:node:";
+    private static final String PUSH_PREFIX = "tm:push:";
 
     private ClusterKeys() {
     }
@@ -30,5 +31,17 @@ final class ClusterKeys {
     /** 节点键的扫描模式（供运维与测试枚举在线节点）。 */
     static String nodePattern() {
         return NODE_PREFIX + "*";
+    }
+
+    /**
+     * 跨节点投递的频道：<b>每个节点只订阅自己的</b>（DESIGN §7.4）。
+     *
+     * <p>用 Pub/Sub 而不是一个共享队列：投递是「点对点且可丢」的
+     * ——目标节点不在线时消息不会被任何人消费，而它本来也不需要被消费（库里已经有了，
+     * 对方重连后按 {@code last_seq} 走 SYNC 补齐）。共享队列会把这个「可丢」
+     * 变成「必须重试」，凭空引入一个消费组与死信队列的运维面。
+     */
+    static String push(String nodeId) {
+        return PUSH_PREFIX + nodeId;
     }
 }

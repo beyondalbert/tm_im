@@ -67,12 +67,13 @@ SERVICE_CHECKS = [
      "库结构与 DDL 一致（--check；有偏差则列出待执行的 ALTER）", "pymysql", ["--check"]),
     ("collation",   "probe_collation.py",
      "实测服务端排序规则等价性（决定 handle 唯一性口径）", "pymysql", []),
-    # 集群路由（tm:route / tm:node）的规则几乎只在「多实例 + 出故障」时才显形：
-    # 顶号误删新连接的路由、节点键不带 TTL、解绑没有 CAS、续期失败不重新注册……
-    # 13 条变异里有 5 条要跑集成测试（真实 Redis），所以放在这一组。
-    # 只跑不需要外部服务的那 8 条： python tools/mutate_cluster_routing.py --unit-only
+    # 集群路由（tm:route / tm:node）与跳节点推送（tm:push:{nodeId}）的规则几乎只在
+    # 「多实例 + 出故障」时才显形：顶号误删新连接的路由、节点键不带 TTL、解绑没有 CAS、
+    # 续期失败不重新注册、订阅相位晚于 Netty、脏载荷弄死监听线程……
+    # 17 条变异里有 6 条要跑集成测试（真实 Redis），所以放在这一组。
+    # 只跑不需要外部服务的那 11 条： python tools/mutate_cluster_routing.py --unit-only
     ("mutate-cluster", "mutate_cluster_routing.py",
-     "变异测试：集群路由/节点探活的 13 条规则都有测试钉住", "", []),
+     "变异测试：集群路由/节点探活/跳节点推送的 17 条规则都有测试钉住", "", []),
     # 同一套规则的「事务」那一半：内存替身没有事务，所以它只能在真实 MySQL 上验。
     # 单独一条而不是混进 CHECKS，原因与上面那组一样：没有凭据的机器上它会因环境而变红。
     ("mutate-member-tx", "mutate_member_rules.py",
