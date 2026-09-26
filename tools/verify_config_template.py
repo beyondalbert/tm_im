@@ -68,10 +68,48 @@ def strip_comments(text: str) -> str:
 
     不去注释会误判：类注释里写 `tm.netty.port` 之类的字样、
     或者被注释掉的旧字段，都会被当成真实存在。
+
+    **同时要认出字符串字面量**（否则一样误判，方向相反）：
+    第一版用正则 `//[^\n]*` 一刀切，而 `String mediaPublicBase =
+    "http://localhost:8080/v1/media";` 里的 `//` 就在字符串里。
+    后果是这一行被从中间截断 → 字段解析不出来 → 报「模板里的
+    `tm.storage.media-public-base` 在配置类里不存在（拼写错误？）」，
+    指向一个完全没写错的配置项，而真正的原因是这个函数。
+    所以这里改成一个小状态机：进字符串就忽略注释符号，处理转义。
     """
-    text = re.sub(r"/\*.*?\*/", "", text, flags=re.S)
-    text = re.sub(r"//[^\n]*", "", text)
-    return text
+    out = []
+    i = 0
+    n = len(text)
+    while i < n:
+        c = text[i]
+        if c == '"':
+            # 字符串字面量：整体保留（含其中的 // 与 /*）。
+            # Java 的文本块（"""）在本仓库里没被用于初值，不单独处理。
+            out.append(c)
+            i += 1
+            while i < n:
+                ch = text[i]
+                out.append(ch)
+                i += 1
+                if ch == "\\":
+                    if i < n:
+                        out.append(text[i])
+                        i += 1
+                    continue
+                if ch == '"':
+                    break
+            continue
+        if c == "/" and i + 1 < n and text[i + 1] == "/":
+            while i < n and text[i] != "\n":
+                i += 1
+            continue
+        if c == "/" and i + 1 < n and text[i + 1] == "*":
+            end = text.find("*/", i + 2)
+            i = n if end < 0 else end + 2
+            continue
+        out.append(c)
+        i += 1
+    return "".join(out)
 
 
 def kebab(name: str) -> str:

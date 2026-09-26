@@ -1168,8 +1168,10 @@ M3 的验收标准是「浏览器双开互发文字，seq 严格递增」。它�
 | **会话：单聊/建群/列表/详情**（§4.1–§4.4） | 已实现 | `ConversationServiceTest`（27 用例）+ `ConversationHttpIT` + `ConversationReadPathIT` |
 | **消息：发送/历史/增量/已读**（§4.5–§4.8） | 已实现 | 同上（写路径复用 `MessageService`，因此错误码与长连接完全一致） |
 | **会话成员管理**（§4.9） | 已实现 | `ConversationMemberServiceTest`（19 用例）+ `ConversationMemberHttpIT`（6 用例，真实 HTTP）+ `ConversationReadPathIT`（转让的原子性与回滚）+ `mutate_member_rules.py`（15 个变异全部被捕获） |
+| **图片：上传/下载/缩略图**（§5） | 已实现 | `MediaServiceTest`（22 用例）+ `LocalFsMediaStoreTest`（9 用例，含路径穿越）+ `MediaHttpIT`（5 用例，真实 multipart 与两处大小限制） |
 | 群公告（`notice`） | **未实现** | §4.9 的 `PATCH /v1/conversations/{id}` 只改群名；公告需要一个新列（DDL + 生成器 + 实体 + 迁移），见 README 的「已知不一致」 |
-| 好友（§3）/ 图片（§5）/ 广场（§6）/ Agent 管理（§7） | **未实现** | — |
+| 图片的用户维度（签名 URL、配额、清理任务） | **未实现** | 当前 `media_id` 即能力（见 03-rest-api §5.2）；`tm.storage.type` 只实现了 `local`，配成 `oss` 会在启动时失败而不是静默降级 |
+| 好友（§3）/ 广场（§6）/ Agent 管理（§7） | **未实现** | — |
 | 用户端 Vue 脚手架 | **未实现** | M3 验收标准的最后一步 |
 | 跨节点投递 `tm:push:{nodeId}` | **未实现** | 见 §7.4 |
 | 列表按「最近活跃」排序的成本 | **已知且待优化** | 每个会话一次点查（`conversation` 没有 `last_message_at` 列）。修法：给 `conversation_member` 加 `last_activity_at` 并建索引，但那是 DDL 变更（生成器 + 实体 + 迁移），所以本轮选择「先正确、再优化」，并在会话数超过 200 时打 WARN |

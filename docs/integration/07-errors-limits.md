@@ -48,13 +48,13 @@
 | 40005 | handle exists | handle 已被占用 | ❌ | 换一个 |
 | 40006 | content too long | 内容超长 | ❌ | 文字 ≤ 5000 字符 |
 | 40007 | invalid msg_type | 未知消息类型 | ❌ | 用 TEXT/IMAGE/SYSTEM |
-| 40008 | media not found | 图片不存在 | ❌ | 先上传 |
+| `40008` | media not found | 图片不存在 | ❌ | 重新上传（拿到引用前已被清理） |
 | 40009 | content type mismatch | content 与 msg_type 不符 | ❌ | 见 03-rest-api §4.5 |
 | 40010 | invalid cursor | 分页游标无效 | ❌ | 重新从头拉 |
 | 40011 | reply_to not found | 引用的消息不存在 | ❌ | 去掉 reply_to |
 | 40012 | message too large | 消息体过大 | ❌ | 图片先上传 |
-| 40013 | unsupported image type | 图片格式不支持 | ❌ | jpg/png/gif/webp |
-| 40014 | image too large | 图片超过 10MB | ❌ | 压缩后再传 |
+| 40013 | unsupported image type | 图片格式不支持或内容损坏 | ❌ | jpg/png/gif/webp（按内容判断，不看文件名） |
+| 40014 | image too large | 图片超过 10MB，或像素数超过 4000 万 | ❌ | 压缩后再传 |
 
 ### 2.2 认证与权限（40100-40399）
 
@@ -298,7 +298,7 @@ if cmd == CMD["ERROR"]:
 | 消息顺序错乱 | 用时间戳排序 | 改用 `seq` |
 | 断线后丢消息 | 未持久化 `last_seq` | 落盘 + 重连发 SYNC |
 | 收不到推送 | Webhook 不可达 / 长连接没建 | 查投递日志 / 连接状态 |
-| 图片 404 | 用了别人的 media_id | 检查归属 |
+| 图片 404 | ID 写错（已删或从未上传） | 检查 media_id 来源；不是「别人的图」——见 03-rest-api §5.2 |
 | 验签一直失败 | 序列化后再签名 | 用原始 body 字节 |
 
 ---

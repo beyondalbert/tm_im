@@ -1,6 +1,8 @@
 package com.tm.im.storage.config;
 
+import com.tm.im.storage.media.StorageProperties;
 import org.mybatis.spring.annotation.MapperScan;
+import org.springframework.boot.context.properties.EnableConfigurationProperties;
 import org.springframework.context.annotation.Configuration;
 
 /**
@@ -23,5 +25,18 @@ import org.springframework.context.annotation.Configuration;
  */
 @Configuration
 @MapperScan("com.tm.im.storage.mapper")
+@EnableConfigurationProperties(StorageProperties.class)
 public class StorageConfiguration {
+
+    /*
+     * 关于 @EnableConfigurationProperties(StorageProperties.class) 为什么在这里：
+     *
+     * 那一组配置项（tm.storage.*）描述的是「字节往哪存」，属于基础设施，与
+     * @MapperScan 一样是「存储层的装配」。把它注册在 tm-core 的 CoreConfiguration 里
+     * 也能跑通（tm-core 依赖 tm-storage），但那样 tm-core 就成了「媒体存储配置的
+     * 拥有者」——它并不知道 /v1/media 用的根目录在哪，也不该知道。
+     *
+     * 代价是启动期校验（LocalFsMediaStore.init）也留在了这一层，那正是我们要的：
+     * 「配了 oss 但没实现」这件事应当在任何用户请求之前失败。
+     */
 }

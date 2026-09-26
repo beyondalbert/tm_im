@@ -9,6 +9,7 @@ import org.slf4j.LoggerFactory;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.ResponseEntity;
 import org.springframework.http.converter.HttpMessageNotReadableException;
+import org.springframework.web.HttpMediaTypeNotSupportedException;
 import org.springframework.web.HttpRequestMethodNotSupportedException;
 import org.springframework.web.bind.MissingRequestHeaderException;
 import org.springframework.web.bind.MissingServletRequestParameterException;
@@ -17,6 +18,7 @@ import org.springframework.web.bind.annotation.RestControllerAdvice;
 import org.springframework.web.context.request.RequestContextHolder;
 import org.springframework.web.context.request.ServletRequestAttributes;
 import org.springframework.web.method.annotation.MethodArgumentTypeMismatchException;
+import org.springframework.web.multipart.MaxUploadSizeExceededException;
 import org.springframework.web.servlet.NoHandlerFoundException;
 import org.springframework.web.servlet.resource.NoResourceFoundException;
 
@@ -89,6 +91,34 @@ public class ApiExceptionHandler {
     public ResponseEntity<ApiResponse<Void>> handleTypeMismatch(MethodArgumentTypeMismatchException e) {
         log.debug("参数类型不符: {}", e.getMessage());
         return ok(ErrorCode.INVALID_PARAMETER);
+    }
+
+    /**
+     * 上传的图片超过容器上限 → {@code 40014}（而非 500）。
+     *
+     * <p>这一条是「Servlet 的 {@code multipart.max-file-size} 与应用层的
+     * {@code tm.storage.max-size-bytes}」这对配置的接缝：超过容器上限的请求
+     * <b>根本到不了控制器</b>，Tomcat 在解析 multipart 时就中断了它
+     * （这也是它比应用层校验更早生效、且不该被拆掉的原因——否则一个 1GB 的
+     * 上传会先被完整读进内存）。但默认它会被兜底处理器翻成 50000，
+     * 而客户端对 50000 的动作是「退避重试」——重试一个超限的文件永远失败。
+     */
+    @ExceptionHandler(MaxUploadSizeExceededException.class)
+    public ResponseEntity<ApiResponse<Void>> handleUploadTooLarge(MaxUploadSizeExceededException e) {
+        log.debug("上传超过容器上限: {}", e.getMessage());
+        return ok(ErrorCode.IMAGE_TOO_LARGE);
+    }
+
+    /**
+     * 上传接口没有用 {@code multipart/form-data} → {@code 40000}。
+     *
+     * <p>同样是「不接它就会变成 500」的一类：{@code Content-Type: application/json}
+     * 打到 {@code POST /v1/media} 是客户端拼错了请求，不是服务端故障。
+     */
+    @ExceptionHandler(HttpMediaTypeNotSupportedException.class)
+    public ResponseEntity<ApiResponse<Void>> handleMediaType(HttpMediaTypeNotSupportedException e) {
+        log.debug("请求体类型不支持: {}", e.getMessage());
+        return ok(ErrorCode.BAD_REQUEST);
     }
 
     /**
