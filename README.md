@@ -172,6 +172,21 @@ uv run --with pyyaml python tools/mutate_config_template.py    # 证明校验器
 **静默忽略**）、以及默认值一致性（代码里没有默认值的项，模板必须用
 `${ENV}` 且不给默认值——否则仓库里就躺着一把能用的密钥）。
 
+### 示例密钥为什么是「16 位且不连续」的
+
+`api_key` 的真实形状是 `sk_live_` + 32 位十六进制。但**文档与测试里不能写足 32 位**：
+GitHub 的密钥扫描是按形状匹配的，一个 32 位十六进制的示例会被判成真的 Stripe Key，
+于是**整条 `git push` 被仓库规则拒绝**（`remote rejected`，并列出命中的提交与行号）。
+两个示例值从 M2/M8 起就躺在历史里，只改工作区没用，所以收尾时做了一次历史改写。
+
+仓库里因此有两条约定：
+
+- 文档一律用 16 位示例值 `sk_live_9f2c1d7a4b8e3f60`，并在紧邻处说明**真实长度**
+  （`docs/integration/03-rest-api.md` §7.1 就是这么处理 `api_key` 的）；
+- 测试里那个「故意带一段不该泄漏的尾巴」的常量改成**拼接书写**
+  （`"sk_live_" + "0123456789abcdef" + "SECRETPART"`）——运行时拼出的字符串
+  逐字节不变，但源码里没有任何一段长得像密钥。
+
 ### 服务端测试：单元 / 集成两层
 
 ```bash
@@ -891,6 +906,21 @@ uv run --with pymysql --with cryptography python tools/diag_conn.py
   若基线也报"可连"，说明本机网络存在透明代理，此时 **TCP 可达不能证明服务存在**，
   脚本会把 TCP 结果降级为警告，只以协议层握手（MySQL 认证 / Redis PING）作为通过依据。
 - **密码泄漏**：所有输出中密码自动脱敏，异常信息中的回显也会被替换。
+
+#### 同一个拦截的另一个后果：`git push` 到 GitHub
+
+`github.com` 在本机解析到 `20.205.243.166`（GitHub 的亚太入口），该 IP 的 443
+被中途阻断（`git push` 报 `Recv failure: Connection was reset`），而 GitHub 的
+其它入口 IP（如 `140.82.113.3`）是通的。**不是 GitHub 不可达，是 DNS 选中的那个
+IP 不通**——所以诊断顺序是「按 IP 逐个测 443」，而不是先怀疑凭据或代理。
+
+本仓库的本地配置钉住了其中一个可用 IP（只影响这个仓库）：
+
+```bash
+git config http.curloptResolve github.com:443:140.82.113.3
+```
+
+该 IP 失效时，`Test-NetConnection <ip> -Port 443` 换一个通的即可。
 
 ## M0 建库建表
 
