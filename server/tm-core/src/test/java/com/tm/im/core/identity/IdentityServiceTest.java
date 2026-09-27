@@ -140,7 +140,10 @@ class IdentityServiceTest {
     @Test
     @DisplayName("错误信息里不出现完整凭证（只留前 8 位用于比对日志与库）")
     void credentialIsNotLeakedInErrors() {
-        String apiKey = "sk_live_" + "0123456789abcdefSECRETPART";
+        // 拼接而不是整串写字面量：整串落在源码里会被 GitHub 的密钥扫描规则
+        // 当成真的 Stripe key（docs/integration/03-rest-api.md 里那个示例同理）。
+        // 运行时拼出的字符串与拆开前逐字节相同，断言强度不变。
+        String apiKey = "sk_live_" + "0123456789abcdef" + "SECRETPART";
         TmException e = catchThrowableOfType(() -> fx.service().authenticate(apiKey, null), TmException.class);
 
         assertThat(e.detail()).doesNotContain("SECRETPART").contains("sk_live_");

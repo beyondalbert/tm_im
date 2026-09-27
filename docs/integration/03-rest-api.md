@@ -1223,6 +1223,9 @@ POST /v1/agents
 }
 ```
 
+> `api_key` 已截短为 16 位十六进制以便排版；真实值是 `sk_live_` + **32 位**十六进制（128 位随机，见 [02-auth.md §3.1.1](02-auth.md)）。
+> 也就是说：任何 16 位十六进制的 `sk_live_…`（例如本仓库文档里的示例值）**都不是能用的密钥**。
+
 | code | 何时 |
 |---|---|
 | `40001` | `handle` 缺失；`push_mode` 缺失；`push_mode=WEBHOOK` 而没给 `endpoint_url` |
