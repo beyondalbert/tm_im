@@ -762,12 +762,36 @@ CREATE TABLE friendship (
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
 
 CREATE TABLE post (
-  id         BIGINT      NOT NULL PRIMARY KEY,
-  author_id  BIGINT      NOT NULL,
-  content    JSON        NOT NULL,
-  visibility TINYINT     NOT NULL DEFAULT 1 COMMENT '1=PUBLIC 2=FRIENDS_ONLY',
+  id             BIGINT      NOT NULL PRIMARY KEY,
+  author_id      BIGINT      NOT NULL,
+  content        JSON        NOT NULL,
+  visibility     TINYINT     NOT NULL DEFAULT 1 COMMENT '1=PUBLIC 2=FRIENDS_ONLY',
+  like_count     INT         NOT NULL DEFAULT 0 COMMENT '冗余计数，与 post_like 同事务更新',
+  comment_count  INT         NOT NULL DEFAULT 0 COMMENT '冗余计数，与 post_comment 同事务更新',
+  client_post_id VARCHAR(64) NULL COMMENT '幂等键（客户端生成，可空）',
+  created_at     DATETIME(3) NOT NULL,
+  UNIQUE KEY uk_post_idem (author_id, client_post_id),
+  KEY idx_author_time (author_id, created_at),
+  KEY idx_visibility_time (visibility, created_at) COMMENT '广场全局流'
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+
+-- 点赞：主键同时回答「谁赞了这条」与「我赞过它吗」，重复点赞由主键冲突拦住（40907）
+CREATE TABLE post_like (
+  post_id    BIGINT      NOT NULL,
+  actor_id   BIGINT      NOT NULL,
   created_at DATETIME(3) NOT NULL,
-  KEY idx_author_time (author_id, created_at)
+  PRIMARY KEY (post_id, actor_id),
+  KEY idx_actor_time (actor_id, created_at)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+
+CREATE TABLE post_comment (
+  id                  BIGINT        NOT NULL PRIMARY KEY,
+  post_id             BIGINT        NOT NULL,
+  author_id           BIGINT        NOT NULL,
+  content             VARCHAR(1000) NOT NULL,
+  reply_to_comment_id BIGINT        NULL,
+  created_at          DATETIME(3)   NOT NULL,
+  KEY idx_post_time (post_id, created_at)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
 
 -- 收件箱式时间线（写扩散产物）
@@ -797,6 +821,9 @@ CREATE TABLE media (
 - **`seq` 而非时间戳排序**：会话内单调整数 → 严格有序、可断点续传（客户端上报 `last_seq`）。
 - **`conversation.seq_counter` 是 Redis 的兑底**：Redis 不可用时用 `UPDATE ... SET seq_counter=seq_counter+1` 拿序号（性能差但不断服务）。
 - **`feed_item` 主键含 `score`**：天然按分排序，`ORDER BY score DESC` 走聚簇索引。
+  注意它包含<b>作者自己</b>那一行（收件人=作者）——见 §11.3 的实现注。
+- **广场的计数是冗余列**（`post.like_count` / `comment_count`）：信息流每页 N 条都带这两个值，
+  现算就是 2N 次聚合；代价是它们必须与明细同事务更新（见 §11.3）。
 - **`DATETIME(3)` 毫秒精度**：IM 场景秒级精度不够。
 
 ---
@@ -965,6 +992,26 @@ score = (发帖时间戳 / 1000) << 20        // 高位：时间序
 - 发帖 → 存 `post` → **异步写扩散**到好友 `feed_item`（大 V 跳过，改读扩散）。
 - 读流 → `ORDER BY score DESC`，游标分页。
 - 可见性：`PUBLIC` / `FRIENDS_ONLY`。
+
+**实现注（M7）——这条公式只解决「同一秒内的次序」，全局的「好友优先」由读取路径解决**：
+
+上面的位布局把好友位放在时间位**之下**，于是它只能在同一秒内生效；
+而 `03-rest-api.md` §6.2 与 `01-concepts.md` §8 对外承诺的是
+「好友的动态整体靠前，非好友的公开动态排在后面」。两者不可能同时成立。
+实现的选择是：公式按本文原样保留（游标里存的就是它），全局优先由
+**两段读**实现——先读好友段（`feed_item` 收件箱，`ORDER BY score DESC`），
+读完再接公开段（`post` 里 `visibility=PUBLIC` 且作者不是好友/不是自己，
+走 `idx_visibility_time`）。游标里的类型标签（`pfeed` / `ppub`）记录读到哪一段。
+
+其余与读扩散有关的实现细节：
+
+| 点 | 说明 |
+|---|---|
+| 作者自己那一行 | 在发帖事务里**同步**写（只有一行，且“发完自己看不到”不可接受）；好友那部分才异步扩散 |
+| 大 V 阈值 | `tm.feed.celebrity-threshold`（默认 10000，即模板里的那个值）：超过则跳过好友扩散并记 WARN |
+| 读扩散 | **尚未实现**（本文说「大 V 跳过，改读扩散」）。当前后果：超阈值的作者其动态不进好友的收件箱（仍出现在公开段与作者个人页）。这是一个已知欠账，列在 §14.1 |
+| 幂等 | `post.client_post_id` + `uk_post_idem (author_id, client_post_id)`（可空；07-errors-limits §3.5 指出发帖原本没有幂等键） |
+| 计数 | `post.like_count` / `comment_count` 是冗余列，与明细行**同事务**更新（每页 20 条不必再发作 40 次 COUNT/EXISTS） |
 
 ### 11.4 加好友
 
@@ -1172,6 +1219,7 @@ M3 的验收标准是「浏览器双开互发文字，seq 严格递增」。它�
 | **图片：上传/下载/缩略图**（§5） | 已实现 | `MediaServiceTest`（22 用例）+ `LocalFsMediaStoreTest`（9 用例，含路径穿越）+ `MediaHttpIT`（5 用例，真实 multipart 与两处大小限制） |
 | **好友：请求/同意/拒绝/列表/删好友/拉黑**（§3） | 已实现 | `FriendServiceTest`（21 用例）+ `FriendHttpIT`（8 用例，含真实 SQL 的分页与「删好友后 40003」）+ `migrate_schema.py`（friendship 新增 4 列 + 2 索引已落到库上） |
 | **Agent 管理：创建/列表/详情/改配置/轮换/停用**（§7） | 已实现 | `AgentServiceTest`（12 用例）+ `AgentHttpIT`（3 用例，其中一条是对等性验收：Agent 用 api_key 走完「加好友 → 被同意 → 发消息」） |
+| **广场：发帖/信息流/个人页/删除/点赞/评论**（§6） | 已实现（大 V 读扩散见 §11.3 的欠账） | `PlazaServiceTest`（23 用例）+ `PlazaHttpIT`（9 用例，真实 MySQL：两段拼接分页、主键冲突回 40907、原子计数、异步扩散落到好友收件箱） |
 | **Agent 主动推送（Webhook 投递）** | **未实现** | 目前只有 `push_mode` 与 `endpoint_url` 的登记与校验（`WEBHOOK` 必须给地址），事件本身尚未发出去。它需要先在扇出路径上回答「这批成员里谁是需要 Webhook 的 Agent」——那是一次批量查询（`AgentProfileRepository.findByIds` 已经就位），但「投递、重试、事件 id 幂等」是一整块（见 05-webhook.md） |
 | 群公告（`notice`） | **未实现** | §4.9 的 `PATCH /v1/conversations/{id}` 只改群名；公告需要一个新列（DDL + 生成器 + 实体 + 迁移），见 README 的「已知不一致」 |
 | 好友集缓存（`tm:friend:{actorId}`） | **未实现** | DESIGN §11.6 的设计里有它，但它要连带解决**跨节点失效**（一个节点的内存缓存删不掉另一个节点的），属于另一件事。当前每次发单聊消息都回源数据库——它一定正确，代价是一次点查 |

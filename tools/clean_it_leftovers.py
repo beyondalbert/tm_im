@@ -260,6 +260,53 @@ def _empty_conversations(cur) -> list[int]:
     return [row[0] for row in cur.fetchall()]
 
 
+def clean_plaza(cur, apply: bool, doomed_actors: list[int]) -> int:
+    """清掉集成测试遗留的广场数据（post / post_like / post_comment / feed_item）。
+
+    判据与其余部分一致：**只按即将被删的测试账号**（handle 形如 `it_...`）。
+    广场的四张表里没有一列能标识「这是测试数据」——`post.id` 是雪花号，
+    `content` 是用户写的文本——所以唯一可靠的判据是「作者/收件人已经不存在了」。
+
+    为什么要清：这些行会真的出现在**别人的信息流**里。
+    `feed_item` 是写扩散的产物，而公开流段会把任何一条 `visibility=PUBLIC`
+    的动态下发给所有非好友的人——包括下一次跑集成测试的那个账号。
+    不过不清的话，`PlazaHttpIT` 里「翻页总共几条」这类断言会随运行次数漂移，
+    于是测试会以一个与代码无关的原因变红。
+
+    `feed_item` 按 `owner_id` 与 `author_id` 各删一遍：作者自己那一行（收件人=作者）
+    与好友那些行（收件人=好友）的 owner/author 恰好互补。
+    """
+    if not doomed_actors:
+        print("广场: 无遗留（没有可判定的测试账号）")
+        return 0
+
+    placeholders = ",".join(["%s"] * len(doomed_actors))
+    args = tuple(doomed_actors)
+    steps = [
+        ("feed_item", f"owner_id IN ({placeholders}) OR author_id IN ({placeholders})",
+         args + args),
+        ("post_like", f"actor_id IN ({placeholders})", args),
+        ("post_comment", f"author_id IN ({placeholders})", args),
+        ("post", f"author_id IN ({placeholders})", args),
+    ]
+
+    total = 0
+    for table, where, params in steps:
+        cur.execute(f"SELECT COUNT(*) FROM `{table}` WHERE {where}", params)
+        n = cur.fetchone()[0]
+        if not n:
+            continue
+        if apply:
+            cur.execute(f"DELETE FROM `{table}` WHERE {where}", params)
+            print(f"  {table}: 清除 {n} 行")
+        else:
+            print(f"  {table}: 发现 {n} 行（未删除）")
+        total += n
+    if total == 0:
+        print("广场: 无遗留")
+    return total
+
+
 def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--apply", action="store_true", help="真正执行删除；默认只统计")
@@ -308,6 +355,8 @@ def main() -> int:
             # 会话清理排在账号之后：它的判据（成员行指向已/将不存在的 actor）
             # 正是「账号刚被删掉」的产物。
             total += clean_conversations(cur, tables, args.apply, doomed_actors)
+            # 广场排在最后：它的判据也是「作者已经不存在」。
+            total += clean_plaza(cur, args.apply, doomed_actors)
     finally:
         conn.close()
 

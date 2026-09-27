@@ -7,6 +7,7 @@ import com.tm.im.core.conversation.ConversationProperties;
 import com.tm.im.core.friend.FriendProperties;
 import com.tm.im.core.identity.JwtTokenService;
 import com.tm.im.core.message.MessageProperties;
+import com.tm.im.core.plaza.PlazaProperties;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.boot.context.properties.EnableConfigurationProperties;
@@ -16,6 +17,12 @@ import org.springframework.context.annotation.Configuration;
 import java.net.InetAddress;
 import java.net.UnknownHostException;
 import java.time.ZoneId;
+import java.util.concurrent.ArrayBlockingQueue;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.ThreadFactory;
+import java.util.concurrent.ThreadPoolExecutor;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicInteger;
 
 /**
  * 领域核心装配。
@@ -28,7 +35,7 @@ import java.time.ZoneId;
 @Configuration
 @EnableConfigurationProperties({SnowflakeProperties.class, IdentityProperties.class,
         TimeProperties.class, MessageProperties.class, ConversationProperties.class,
-        FriendProperties.class, AgentProperties.class})
+        FriendProperties.class, AgentProperties.class, PlazaProperties.class})
 public class CoreConfiguration {
 
     private static final Logger log = LoggerFactory.getLogger(CoreConfiguration.class);
@@ -58,6 +65,38 @@ public class CoreConfiguration {
         log.info("数据库时间口径 tm.time.zone={}（必须与 sharding.yaml 中 jdbcUrl 的 serverTimezone 一致）",
                 properties.getZone());
         return properties.getZone();
+    }
+
+    /**
+     * 写扩散（广场）的线程池 —— 发帖之后把动态写进好友的收件箱。
+     *
+     * <p><b>为什么是一个固定大小的有界线程池而不是 {@code newCachedThreadPool}</b>：
+     * 扩散任务的代价是「作者好友数」次 INSERT，而一条被转发到几万人的动态
+     * 能让缓存线程池开出几万个线程——那不是“更高的并发”，而是一次自杀。
+     * 池子满了就丢弃（记 WARN）：发帖接口不该因为扩散队列的长度而变慢，
+     * 而丢掉的那部分正好可以由读取路径（公开流）补上。
+     *
+     * <p>线程是 daemon：应用停机时它们不该拖住 JVM，{@code destroyMethod=shutdown}
+     * 只是让“优雅停机”时任务有机会跑完当前那一批。
+     */
+    @Bean(name = "plazaFanoutExecutor", destroyMethod = "shutdown")
+    public ExecutorService plazaFanoutExecutor(PlazaProperties properties) {
+        int threads = Math.max(1, properties.getFanoutThreads());
+        int queue = Math.max(1, properties.getFanoutQueueCapacity());
+        AtomicInteger seq = new AtomicInteger();
+        ThreadFactory factory = runnable -> {
+            Thread thread = new Thread(runnable, "tm-fanout-" + seq.incrementAndGet());
+            thread.setDaemon(true);
+            return thread;
+        };
+        ThreadPoolExecutor executor = new ThreadPoolExecutor(threads, threads,
+                0L, TimeUnit.MILLISECONDS, new ArrayBlockingQueue<>(queue), factory,
+                (task, pool) -> log.warn("写扩散队列已满（tm.feed.fanout-queue-capacity={}），"
+                        + "丢弃本次扩散任务：那条动态不会进好友的收件箱，"
+                        + "但它仍会出现在作者个人页与公开流里", queue));
+        log.info("广场写扩散线程池: threads={} queue={} 大V阈值={}",
+                threads, queue, properties.getCelebrityThreshold());
+        return executor;
     }
 
     private static String hostname() {

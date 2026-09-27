@@ -98,8 +98,8 @@ public class InMemoryFriendships implements FriendshipRepository {
     public List<Long> listFriendIds(long actorId, int limit) {
         return rows.values().stream()
                 .filter(row -> row.getStatus() == FriendshipStatus.ACCEPTED)
-                .flatMap(row -> java.util.stream.Stream.of(row.getActorA(), row.getActorB()))
-                .filter(id -> id != actorId)
+                .filter(row -> row.getActorA() == actorId || row.getActorB() == actorId)
+                .map(row -> row.getActorA() == actorId ? row.getActorB() : row.getActorA())
                 .distinct()
                 .limit(Math.max(1, limit))
                 .toList();

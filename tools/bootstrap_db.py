@@ -262,7 +262,8 @@ def main() -> int:
                         key=lambda x: int(x.split("_")[1]))
     biz = sorted(t for t in have if not re.fullmatch(r"message_\d+", t))
     expect_biz = {"actor", "actor_secret", "agent_profile", "conversation",
-                  "conversation_member", "friendship", "post", "feed_item", "media"}
+                  "conversation_member", "friendship", "post", "post_like", "post_comment",
+                  "feed_item", "media"}
 
     if len(msg_tables) == 16:
         ok(f"分片表 16 张齐全: message_0 .. message_15")

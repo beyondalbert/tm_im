@@ -145,9 +145,10 @@ def main() -> int:
     biz_tables = sorted(t for t in tables if not re.fullmatch(r"message_\d+", t))
 
     expect_biz = {"actor", "actor_secret", "agent_profile", "conversation",
-                  "conversation_member", "friendship", "post", "feed_item", "media"}
+                  "conversation_member", "friendship", "post", "post_like", "post_comment",
+                  "feed_item", "media"}
     if set(biz_tables) == expect_biz:
-        ok(f"业务表 9 张齐全: {', '.join(biz_tables)}")
+        ok(f"业务表 11 张齐全: {', '.join(biz_tables)}")
     else:
         missing = expect_biz - set(biz_tables)
         extra = set(biz_tables) - expect_biz
@@ -343,6 +344,30 @@ def main() -> int:
         ok("feed_item 主键含 score —— ORDER BY score DESC 走聚簇索引")
     else:
         bad("feed_item 主键应含 score")
+
+    # ---- 广场：幂等键、冗余计数、点赞/评论两表的可查询性（M7） ----
+    post = tables.get("post", "")
+    if "UNIQUE KEY `uk_post_idem` (`author_id`, `client_post_id`)" in post:
+        ok("post 有 (author_id, client_post_id) 唯一键 —— 发动态重试不会重复落库")
+    else:
+        bad("post 缺 uk_post_idem（幂等键）—— 客户端重试会发出两条一模一样的动态")
+    for col in ("like_count", "comment_count"):
+        if re.search(r"`" + col + r"`\s+INT\s+NOT NULL DEFAULT 0", post):
+            ok(f"post.{col} 是非空计数列（NOT NULL 才能免去读取侧的判空）")
+        else:
+            bad(f"post.{col} 应为 INT NOT NULL DEFAULT 0")
+
+    pl = tables.get("post_like", "")
+    if "PRIMARY KEY (`post_id`, `actor_id`)" in pl:
+        ok("post_like 主键 (post_id, actor_id) —— 重复点赞由主键冲突拦住（40907）")
+    else:
+        bad("post_like 主键应为 (post_id, actor_id)：否则并发双击会让计数加两次")
+
+    pc = tables.get("post_comment", "")
+    if "KEY `idx_post_time` (`post_id`, `created_at`)" in pc:
+        ok("post_comment 有 (post_id, created_at) 索引 —— 按动态拉评论走索引")
+    else:
+        bad("post_comment 缺 idx_post_time")
 
     # 时间精度
     bad_dt = [t for t, s in tables.items()

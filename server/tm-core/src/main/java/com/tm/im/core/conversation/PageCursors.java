@@ -40,6 +40,18 @@ public final class PageCursors {
     private static final String TYPE_FRIEND = "friend";
     private static final String TYPE_FRIEND_REQUEST = "freq";
 
+    /** 好友段的信息流游标（{@code feed_item.score} + {@code post_id}）。 */
+    public static final String TYPE_PLAZA_FEED = "pfeed";
+
+    /** 公开流段的游标（{@code post.created_at} + {@code post.id}）。 */
+    public static final String TYPE_PLAZA_PUBLIC = "ppub";
+
+    /** §6.3「某人的动态」的游标。与公开流形状相同，但**刻意是另一个类型**。 */
+    private static final String TYPE_PLAZA_POSTS = "ppost";
+
+    /** §6.6 评论列表的游标。 */
+    private static final String TYPE_PLAZA_COMMENT = "pcmt";
+
     private PageCursors() {
     }
 
@@ -149,6 +161,135 @@ public final class PageCursors {
         return new MessageCursor(seq);
     }
 
+    // ------------------------------------------------------------------ 广场（§6）
+
+    /**
+     * 游标的类型标签（{@code t}），用于「多段游标」的接口先分派再解码。
+     *
+     * <p>返回值 {@code null} 表示这个字符串根本不是「base64 包着的 JSON 对象」——
+     * 调用方应当把它交给对应的 {@code decodeXxx} 去抛 {@code 40010}
+     * （那是唯一会带上原值与具体原因的地方）。
+     *
+     * <p>为什么需要它：信息流的两段各有自己的游标形状，而「读哪一段」必须
+     * 在解码之前就知道。让调用方自己 base64 解一遍等于把格式解析写两遍。
+     */
+    public static String typeOf(String cursor) {
+        if (cursor == null || cursor.isBlank()) {
+            return null;
+        }
+        try {
+            byte[] raw = Base64.getMimeDecoder().decode(cursor);
+            JsonNode node = Json.mapper().readTree(new String(raw, StandardCharsets.UTF_8));
+            if (node == null || !node.isObject() || !node.path("v").isNumber()
+                    || node.path("v").asInt() != VERSION) {
+                return null;
+            }
+            JsonNode type = node.get("t");
+            return type == null || !type.isTextual() ? null : type.asText();
+        } catch (Exception e) {
+            return null;
+        }
+    }
+
+    /**
+     * 信息流<b>好友段</b>的游标：{@code (score, post_id)}。
+     *
+     * <p>直接携带 {@code feed_item.score} 而不是「时间戳」：score 是主键的一部分，
+     * 而把 score 反解回时间再比较会丢掉那 20 位 tieBreaker，
+     * 于是同一秒内的多条动态在翻页时表现成「重复/漏项」（见 {@link FeedScores} 的注释）。
+     */
+    public record PlazaFeedCursor(long score, long postId) {
+    }
+
+    /**
+     * 信息流<b>公开流段</b>的游标：{@code (created_at 毫秒, post_id)}。
+     *
+     * <p>两个字段<b>都为 null</b> 是一种合法取值，含义是「从最新一条开始」。
+     * 它不是冗余设计：好友段读完之后要继续往公开流里填，而当好友段恰好填满一页时，
+     * 服务端需要给客户端一个「公开流还没开始」的游标——那个位置不存在具体的行，
+     * 所以它只能被显式表达。用哨兵值（如 {@code Long.MAX_VALUE}）代替会有一个
+     * 隐藏的失败面：哨兵落在合法取值区间里，客户端只要从别处抄一个时间戳就能撞上它。
+     */
+    public record PlazaPublicCursor(Long atMillis, Long postId) {
+    }
+
+    /** §6.3「某人的动态」的游标：{@code (created_at 毫秒, post_id)}。 */
+    public record PlazaPostsCursor(long atMillis, long postId) {
+    }
+
+    /** §6.6 评论列表的游标：{@code (created_at 毫秒, comment_id)}。 */
+    public record PlazaCommentCursor(long atMillis, long commentId) {
+    }
+
+    public static String encodePlazaFeed(long score, long postId) {
+        return encode("{\"v\":" + VERSION + ",\"t\":\"" + TYPE_PLAZA_FEED
+                + "\",\"sc\":" + score + ",\"pid\":" + postId + "}");
+    }
+
+    /** 公开流的「起始位置」游标（好友段刚读完、还没取过公开流里的任何一条）。 */
+    public static String encodePlazaPublicStart() {
+        return encode("{\"v\":" + VERSION + ",\"t\":\"" + TYPE_PLAZA_PUBLIC + "\"}");
+    }
+
+    public static String encodePlazaPublic(long atMillis, long postId) {
+        return encode("{\"v\":" + VERSION + ",\"t\":\"" + TYPE_PLAZA_PUBLIC
+                + "\",\"at\":" + atMillis + ",\"pid\":" + postId + "}");
+    }
+
+    public static String encodePlazaPosts(long atMillis, long postId) {
+        return encode("{\"v\":" + VERSION + ",\"t\":\"" + TYPE_PLAZA_POSTS
+                + "\",\"at\":" + atMillis + ",\"pid\":" + postId + "}");
+    }
+
+    public static String encodePlazaComment(long atMillis, long commentId) {
+        return encode("{\"v\":" + VERSION + ",\"t\":\"" + TYPE_PLAZA_COMMENT
+                + "\",\"at\":" + atMillis + ",\"cid\":" + commentId + "}");
+    }
+
+    public static PlazaFeedCursor decodePlazaFeed(String cursor) {
+        JsonNode node = parse(cursor, TYPE_PLAZA_FEED);
+        long score = requireLong(node, "sc", cursor);
+        long postId = requireLong(node, "pid", cursor);
+        if (score < 0) {
+            throw invalid(cursor, "sc（排序分）为负");
+        }
+        if (postId <= 0) {
+            throw invalid(cursor, "pid（动态 id）必须为正整数");
+        }
+        return new PlazaFeedCursor(score, postId);
+    }
+
+    public static PlazaPublicCursor decodePlazaPublic(String cursor) {
+        JsonNode node = parse(cursor, TYPE_PLAZA_PUBLIC);
+        return new PlazaPublicCursor(optionalLong(node, "at"), optionalLong(node, "pid"));
+    }
+
+    public static PlazaPostsCursor decodePlazaPosts(String cursor) {
+        JsonNode node = parse(cursor, TYPE_PLAZA_POSTS);
+        long at = requireLong(node, "at", cursor);
+        long postId = requireLong(node, "pid", cursor);
+        if (at < 0) {
+            throw invalid(cursor, "at（时间）为负");
+        }
+        if (postId <= 0) {
+            throw invalid(cursor, "pid（动态 id）必须为正整数");
+        }
+        return new PlazaPostsCursor(at, postId);
+    }
+
+    public static PlazaCommentCursor decodePlazaComment(String cursor) {
+        JsonNode node = parse(cursor, TYPE_PLAZA_COMMENT);
+        long at = requireLong(node, "at", cursor);
+        long cid = requireLong(node, "cid", cursor);
+        if (at < 0) {
+            throw invalid(cursor, "at（时间）为负");
+        }
+        if (cid <= 0) {
+            throw invalid(cursor, "cid（评论 id）必须为正整数");
+        }
+        return new PlazaCommentCursor(at, cid);
+    }
+
     // ------------------------------------------------------------------ 内部
 
     private static String encode(String json) {
@@ -194,6 +335,12 @@ public final class PageCursors {
             throw invalid(cursor, "缺少数字字段 " + field);
         }
         return value.asLong();
+    }
+
+    /** 可选数字字段：缺席或 null 都返回 null（见 {@link #encodePlazaPublicStart}）。 */
+    private static Long optionalLong(JsonNode node, String field) {
+        JsonNode value = node.get(field);
+        return value == null || value.isNull() || !value.isNumber() ? null : value.asLong();
     }
 
     private static TmException invalid(String cursor, String why) {

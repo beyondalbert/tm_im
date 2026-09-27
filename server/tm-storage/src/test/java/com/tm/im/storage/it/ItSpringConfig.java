@@ -1,6 +1,7 @@
 package com.tm.im.storage.it;
 
 import com.baomidou.mybatisplus.spring.MybatisSqlSessionFactoryBean;
+import com.tm.im.storage.batch.FeedItemBatchMapper;
 import com.tm.im.storage.mapper.ConversationMapper;
 import com.tm.im.storage.mapper.ConversationMemberMapper;
 import com.tm.im.storage.repository.ConversationRepositoryImpl;
@@ -35,6 +36,13 @@ import org.springframework.transaction.annotation.EnableTransactionManagement;
  * 扫描则保证容器与生产装配一致（仓储都在 {@code com.tm.im.storage.repository} 下，
  * 依赖只有 Mapper 与 Redis 模板，这里都已提供）。
  *
+ * <p><b>{@code @MapperScan} 要盖两个包</b>：与生产的 {@code StorageConfiguration} 同一清单。
+ * 一个包是生成的 Mapper（{@code com.tm.im.storage.mapper}），另一个是手写的
+ * （{@code com.tm.im.storage.batch}：生成器会把不认识的残留文件删掉，所以手写 SQL
+ * 不能放在生成的包里）。少扫一个的后果不是「那个 Mapper 用不到」，而是
+ * 「写扩散的仓储缺一个构造参数」——整个容器起不来，而报错指向的是仓储而不是扫描范围
+ * （本条就是被 {@code mutate_member_rules.py} 的那条真实 MySQL 变异抓到的）。
+ *
  * <p>Redis 那部分装配在 {@link RedisItConfig}（本类 {@code @Import} 它）：
  * 只依赖 Redis 的集成测试（如 tm-channel 的 {@code ClusterRedisIT}）直接用它就够了，
  * 不必为了几条 Redis 断言先把 ShardingSphere + MySQL 拉起来。
@@ -42,7 +50,7 @@ import org.springframework.transaction.annotation.EnableTransactionManagement;
 @Configuration
 @EnableTransactionManagement
 @ComponentScan(basePackageClasses = ConversationRepositoryImpl.class)
-@MapperScan(basePackageClasses = ConversationMapper.class)
+@MapperScan(basePackageClasses = {ConversationMapper.class, FeedItemBatchMapper.class})
 @Import(RedisItConfig.class)
 public class ItSpringConfig {
 

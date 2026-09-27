@@ -262,16 +262,57 @@ CREATE TABLE IF NOT EXISTS `friendship` (
   KEY `idx_initiator_status` (`initiator`, `status`)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COMMENT='好友关系（含请求生命周期），无序对存储';
 
+-- 两个冗余计数列（like_count / comment_count）不是「优化」，是**读取侧的必需字段**：
+-- 信息流每页 20 条都要带 like_count/comment_count/liked_by_me（03-rest-api.md §6.2），
+-- 若每次现算，一页就是 20 次 COUNT(*) + 20 次 EXISTS —— 而信息流是全站读得最频繁的接口。
+-- 代价是「计数与明细必须同事务更新」（见 PostLikeRepositoryImpl/PostCommentRepositoryImpl）：
+-- 只有同事务才能保证「要么都成功、要么都不发生」，跨事务的修正任务则会长期漂移。
+--
+-- client_post_id 是幂等键（07-errors-limits.md §3.5 指出「发动态无幂等键 → 重试会重复」）：
+-- 它可空（老的调用方不带它），唯一约束含 author_id，因此「同一个人的同一条草稿重复提交」
+-- 只会落一行；而 NULL 在 MySQL 的唯一索引里不参与去重，所以「不带幂等键」仍可有任意多条。
 CREATE TABLE IF NOT EXISTS `post` (
-  `id`         BIGINT      NOT NULL,
-  `author_id`  BIGINT      NOT NULL,
-  `content`    JSON        NOT NULL,
-  `visibility` TINYINT     NOT NULL DEFAULT 1        COMMENT '1=PUBLIC 2=FRIENDS_ONLY',
-  `created_at` DATETIME(3) NOT NULL,
+  `id`             BIGINT      NOT NULL,
+  `author_id`      BIGINT      NOT NULL,
+  `content`        JSON        NOT NULL,
+  `visibility`     TINYINT     NOT NULL DEFAULT 1   COMMENT '1=PUBLIC 2=FRIENDS_ONLY',
+  `like_count`     INT         NOT NULL DEFAULT 0   COMMENT '冗余计数，与 post_like 同事务更新',
+  `comment_count`  INT         NOT NULL DEFAULT 0   COMMENT '冗余计数，与 post_comment 同事务更新',
+  `client_post_id` VARCHAR(64) NULL                 COMMENT '幂等键（客户端生成，可空）',
+  `created_at`     DATETIME(3) NOT NULL,
   PRIMARY KEY (`id`),
+  UNIQUE KEY `uk_post_idem` (`author_id`, `client_post_id`)  COMMENT '幂等：同一作者的同一 client_post_id 只落一行（NULL 不参与）',
   KEY `idx_author_time` (`author_id`, `created_at`),
   KEY `idx_visibility_time` (`visibility`, `created_at`)  COMMENT '广场全局流'
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COMMENT='动态';
+
+-- 点赞：主键 (post_id, actor_id) 同时回答两个问题——
+--   「这条动态有哪些人赞了」（前缀扫描）与「我赞过它吗」（整键点查），
+-- 所以它不需要单独的 liked_by_me 列或第二个索引。
+-- 重复点赞由主键冲突直接拦住（应用层翻成 40907），而不是「先查再写」：
+-- 后者在并发双击下两个请求都会查不到、然后都插入，计数被加两次。
+CREATE TABLE IF NOT EXISTS `post_like` (
+  `post_id`    BIGINT      NOT NULL,
+  `actor_id`   BIGINT      NOT NULL,
+  `created_at` DATETIME(3) NOT NULL,
+  PRIMARY KEY (`post_id`, `actor_id`),
+  KEY `idx_actor_time` (`actor_id`, `created_at`)      COMMENT '我赞过的（个人页/风控）'
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COMMENT='动态点赞';
+
+-- 评论：content 用 VARCHAR(1000) 而不是 JSON ——
+-- 评论是「一段文字 + 一个可选的回复目标」，而 reply_to_comment_id 已经把那半个结构
+-- 提成了列；再套一层 JSON 只会让「内容超长」这个校验变成对 JSON 内部字段的校验。
+-- 长度上限与动态正文分开：正文 5000 字符（40006），评论 1000 字符。
+CREATE TABLE IF NOT EXISTS `post_comment` (
+  `id`                  BIGINT        NOT NULL      COMMENT 'Snowflake',
+  `post_id`             BIGINT        NOT NULL,
+  `author_id`           BIGINT        NOT NULL,
+  `content`             VARCHAR(1000) NOT NULL,
+  `reply_to_comment_id` BIGINT        NULL          COMMENT '被回复的评论 id；顶层评论为 NULL',
+  `created_at`          DATETIME(3)   NOT NULL,
+  PRIMARY KEY (`id`),
+  KEY `idx_post_time` (`post_id`, `created_at`)       COMMENT '按动态拉评论'
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COMMENT='动态评论';
 
 -- 收件箱式时间线（写扩散产物）。
 -- 主键含 score → ORDER BY score DESC 走聚簇索引，无需额外排序
@@ -337,7 +378,7 @@ def build(shards: int, prefix: str, collation: str = COLLATION) -> str:
             message_tables(shards),
             social_tables(),
             "-- ============================================================================\n"
-            f"-- 共 {shards} 张 message 分片表 + 9 张非分片表\n"
+            f"-- 共 {shards} 张 message 分片表 + 11 张非分片表\n"
             "-- ============================================================================\n",
         ]
         text = "\n".join(parts)

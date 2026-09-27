@@ -13,6 +13,12 @@ import org.springframework.context.annotation.Configuration;
  * 不加这一行，症状是启动时报
  * {@code NoSuchBeanDefinitionException: ...Mapper}，而 Mapper 文件明明就在那儿。
  *
+ * <p><b>为什么有两个包</b>：{@code com.tm.im.storage.mapper} 的约定是「全部由
+ * tools/gen_entities.py 生成」，而生成器会把不认识的残留文件删掉（{@code --check}
+ * 会把它报成「生成器已不产出」）。所以<b>手写</b>的 Mapper（带自定义 SQL 的那些，
+ * 目前只有写扩散用的 {@code FeedItemBatchMapper}）放在 {@code com.tm.im.storage.batch}，
+ * 两个包都在这里声明。
+ *
  * <p>枚举与字段映射的配置刻意<b>放在 application.yml 里而不是这里写 Java</b>：
  * <pre>
  * mybatis-plus:
@@ -24,7 +30,7 @@ import org.springframework.context.annotation.Configuration;
  * 这是一个部署期就应当一眼可查的开关。藏在 Java 里，出问题时得先翻代码才知道当前是什么状态。
  */
 @Configuration
-@MapperScan("com.tm.im.storage.mapper")
+@MapperScan({"com.tm.im.storage.mapper", "com.tm.im.storage.batch"})
 @EnableConfigurationProperties(StorageProperties.class)
 public class StorageConfiguration {
 

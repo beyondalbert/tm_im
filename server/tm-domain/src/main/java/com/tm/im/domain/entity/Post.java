@@ -1,4 +1,4 @@
-// 源: deploy/sql/01-schema.sql  sha256[:16]=6e25d69f6d539a88
+// 源: deploy/sql/01-schema.sql  sha256[:16]=7818dd686897f64d
 package com.tm.im.domain.entity;
 
 import com.baomidou.mybatisplus.annotation.IdType;
@@ -26,6 +26,15 @@ public class Post {
 
     /** 1=PUBLIC 2=FRIENDS_ONLY */
     private Visibility visibility;
+
+    /** 冗余计数，与 post_like 同事务更新 */
+    private Integer likeCount;
+
+    /** 冗余计数，与 post_comment 同事务更新 */
+    private Integer commentCount;
+
+    /** 幂等键（客户端生成，可空） */
+    private String clientPostId;
 
     private LocalDateTime createdAt;
 
@@ -61,6 +70,30 @@ public class Post {
         this.visibility = visibility;
     }
 
+    public Integer getLikeCount() {
+        return likeCount;
+    }
+
+    public void setLikeCount(Integer likeCount) {
+        this.likeCount = likeCount;
+    }
+
+    public Integer getCommentCount() {
+        return commentCount;
+    }
+
+    public void setCommentCount(Integer commentCount) {
+        this.commentCount = commentCount;
+    }
+
+    public String getClientPostId() {
+        return clientPostId;
+    }
+
+    public void setClientPostId(String clientPostId) {
+        this.clientPostId = clientPostId;
+    }
+
     public LocalDateTime getCreatedAt() {
         return createdAt;
     }
@@ -80,6 +113,9 @@ public class Post {
                 "authorId=" + authorId + ", " +
                 "content=" + content + ", " +
                 "visibility=" + visibility + ", " +
+                "likeCount=" + likeCount + ", " +
+                "commentCount=" + commentCount + ", " +
+                "clientPostId=" + clientPostId + ", " +
                 "createdAt=" + createdAt
                 + '}';
     }
