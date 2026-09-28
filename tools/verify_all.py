@@ -32,6 +32,10 @@ CHECKS = [
     ("shard",    "validate_yaml.py",            "分片口径三方一致 + 配置可解析", "pyyaml", []),
     ("errors",   "verify_error_codes.py",       "错误码契约：文档 §2 ↔ 枚举",   "", []),
     ("entities", "gen_entities.py",             "实体与建表 SQL 一致（--check）", "", ["--check"]),
+    # DESIGN §9 的 SQL 块不参与编译也不被执行，于是它会静默地比库里旧：
+    # 这一轮就查出 friendship 少了四列、actor_secret 的主键写成了单列。
+    # 而它是新人与未来的自己读模型的第一入口。
+    ("design-ddl", "verify_design_ddl.py",      "DESIGN §9 的 DDL 与生成器逐列一致", "", []),
     ("samples",  "verify_doc_samples.py",       "Webhook 签名测试向量",         "", []),
     # 模板是「运维视角的权威文档」，而代码才是默认值的真正来源。
     # 两者之间没有任何编译期约束，缺项的表现是「运维照模板配完，服务用的是代码默认值」——

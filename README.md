@@ -72,6 +72,7 @@ uv run --with protobuf --with pyyaml --with sqlglot python tools/verify_all.py
 | `shard` | 分片口径三方一致（DDL ↔ 模板 ↔ 代码）+ 配置可解析 + **`!SINGLE` 单表规则必须非空** |
 | `errors` | 错误码契约：文档 §2 ↔ 枚举 |
 | `entities` | 实体类与建表 SQL 一致 |
+| `design-ddl` | **DESIGN §9 的 DDL 与生成器逐列一致**（带 8 类漂移的自检：缺列/类型/可空性/默认值/索引/多表/漏表） |
 | `samples` | Webhook 签名测试向量 |
 | `config-tmpl` | 配置模板与 `@ConfigurationProperties` 一致（缺项 / 拼错 / 默认值不一致） |
 | `mutate` | **变异测试**：验证建表校验器真的能抓到错误 |

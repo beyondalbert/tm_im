@@ -666,6 +666,11 @@ PRIMARY KEY (conv_id, seq)   -- 包含分片列，保证同会话聚簇
 > `deploy/sql/01-schema.sql`，其中 16 张 `message_N` 分片表由模板展开，**不存在手写漂移**。
 > 两者由 `tools/verify_schema.py` 断言一致（分片数、分片列、幂等键、引擎、字符集）。
 >
+> 本节那三个 SQL 块**逐列**与生成器比对（`tools/verify_design_ddl.py`：列的类型/
+> 可空性/默认值、索引的列与顺序、以及「生成器里有而文档没写」）。这一段不参与编译，
+> 所以它曾经真的漂过：`friendship` 少了 `request_id`/`message`/`expires_at`/`created_at`，
+> `actor_secret` 的主键写成了 `actor_id` 单列。
+>
 > 改结构时：**改生成器** → 重跑 `python tools/gen_schema.py` → 本节同步更新。
 
 ### 9.1 参与者（人与 Agent 同构）
@@ -687,10 +692,12 @@ CREATE TABLE actor (
 
 -- 凭据独立表（敏感数据隔离）
 CREATE TABLE actor_secret (
-  actor_id      BIGINT       NOT NULL PRIMARY KEY,
-  secret_type   TINYINT      NOT NULL COMMENT '1=密码哈希 2=API_KEY哈希',
+  actor_id      BIGINT       NOT NULL,
+  secret_type   TINYINT      NOT NULL COMMENT '1=密码哈希 2=API_KEY哈希 3=WEBHOOK密钥(明文,需用于签名)',
   secret_hash   VARCHAR(255) NOT NULL,
-  last_used_at  DATETIME(3)  NULL
+  last_used_at  DATETIME(3)  NULL,
+  PRIMARY KEY (actor_id, secret_type),
+  UNIQUE KEY uk_secret_hash (secret_hash)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
 
 -- Agent 专属扩展（Human 无此行）
@@ -710,12 +717,16 @@ CREATE TABLE agent_profile (
 
 ```sql
 CREATE TABLE conversation (
-  id           BIGINT       NOT NULL PRIMARY KEY,
+  id           BIGINT       NOT NULL,
   conv_type    TINYINT      NOT NULL COMMENT '1=DIRECT 2=GROUP',
   title        VARCHAR(128) NULL,
   owner_actor  BIGINT       NULL COMMENT '群主；单聊为 NULL',
   seq_counter  BIGINT       NOT NULL DEFAULT 0 COMMENT 'Redis 失效时的兑底',
-  created_at   DATETIME(3)  NOT NULL
+  pair_key     VARCHAR(80)  NULL COMMENT '单聊去重键：min_max（与 uk_pair_key 一起保证单聊唯一）',
+  created_at   DATETIME(3)  NOT NULL,
+  PRIMARY KEY (id),
+  UNIQUE KEY uk_pair_key (pair_key),
+  KEY idx_owner (owner_actor)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
 
 CREATE TABLE conversation_member (
@@ -754,13 +765,22 @@ CREATE TABLE message_0 (          -- message_1 .. message_15 同构
 
 ```sql
 CREATE TABLE friendship (
-  actor_a    BIGINT      NOT NULL COMMENT '约定 actor_a < actor_b，消除方向',
-  actor_b    BIGINT      NOT NULL,
-  status     TINYINT     NOT NULL COMMENT '1=PENDING 2=ACCEPTED 3=BLOCKED',
-  initiator  BIGINT      NOT NULL,
-  updated_at DATETIME(3) NOT NULL,
+  -- 本表同时承载「请求」的生命周期（§11.4）：发起 → PENDING → ACCEPTED。
+  -- 另开一张 friend_request 表的话，「谁是发起人」「当前什么状态」会存两份，
+  -- 而不一致的表现是「请求被接受了，但发消息仍说不是好友」。
+  request_id BIGINT       NOT NULL COMMENT '好友请求 id（雪花号）；accept/reject 按它定位',
+  actor_a    BIGINT       NOT NULL COMMENT '约定 actor_a < actor_b，消除方向',
+  actor_b    BIGINT       NOT NULL,
+  status     TINYINT      NOT NULL COMMENT '1=PENDING 2=ACCEPTED 3=BLOCKED',
+  initiator  BIGINT       NOT NULL COMMENT '发起方，用于展示「谁加的你」',
+  message    VARCHAR(255) NULL COMMENT '请求附言（仅 PENDING 时有意义）',
+  expires_at DATETIME(3)  NOT NULL COMMENT 'PENDING 的失效时间（ACCEPTED/BLOCKED 后保留原值）',
+  created_at DATETIME(3)  NOT NULL,
+  updated_at DATETIME(3)  NOT NULL COMMENT '最后一次状态变更时间；ACCEPTED 行的它就是 friends_since',
   PRIMARY KEY (actor_a, actor_b),
-  KEY idx_b (actor_b, status)
+  UNIQUE KEY uk_request_id (request_id),
+  KEY idx_b (actor_b, status),
+  KEY idx_initiator_status (initiator, status)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
 
 CREATE TABLE post (
@@ -802,7 +822,8 @@ CREATE TABLE feed_item (
   score     BIGINT NOT NULL COMMENT '排序分（好友加权）',
   post_id   BIGINT NOT NULL,
   author_id BIGINT NOT NULL,
-  PRIMARY KEY (owner_id, score, post_id)
+  PRIMARY KEY (owner_id, score, post_id),
+  KEY idx_post (post_id) COMMENT '删动态时级联清'
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
 
 CREATE TABLE media (
@@ -813,7 +834,9 @@ CREATE TABLE media (
   width      INT          NULL,
   height     INT          NULL,
   size_bytes BIGINT       NULL,
-  created_at DATETIME(3)  NOT NULL
+  created_at DATETIME(3)  NOT NULL,
+  PRIMARY KEY (id),
+  KEY idx_owner_time (owner_id, created_at) COMMENT '「我的媒体」列表'
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
 ```
 
