@@ -234,6 +234,13 @@ class IdentityServiceTest {
                 public void update(Actor actor) {
                     actors.put(actor.getId(), actor);
                 }
+
+                @Override
+                public List<Actor> pageForAdmin(Long beforeId, int limit, ActorType actorType,
+                                                ActorStatus status, String handlePrefix) {
+                    // 鉴权用例不涉及后台列表；见 InMemoryActorRepository 的同类注释。
+                    return List.of();
+                }
             };
         }
 

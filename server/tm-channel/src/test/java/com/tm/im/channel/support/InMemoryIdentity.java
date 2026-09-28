@@ -126,6 +126,13 @@ public final class InMemoryIdentity {
                 throw new UnsupportedOperationException(
                         "长连接路径不应改 Actor 表：资料修改属于 REST");
             }
+
+            @Override
+            public List<Actor> pageForAdmin(Long beforeId, int limit, ActorType actorType,
+                                           ActorStatus status, String handlePrefix) {
+                throw new UnsupportedOperationException(
+                        "长连接路径不应读后台列表：那是 tm-admin 的接口");
+            }
         };
     }
 

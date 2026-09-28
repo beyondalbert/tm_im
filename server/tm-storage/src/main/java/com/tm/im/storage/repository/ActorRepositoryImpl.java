@@ -2,6 +2,8 @@ package com.tm.im.storage.repository;
 
 import com.baomidou.mybatisplus.core.toolkit.Wrappers;
 import com.tm.im.domain.entity.Actor;
+import com.tm.im.domain.enums.ActorStatus;
+import com.tm.im.domain.enums.ActorType;
 import com.tm.im.domain.repository.ActorRepository;
 import com.tm.im.storage.mapper.ActorMapper;
 import org.springframework.stereotype.Repository;
@@ -52,6 +54,23 @@ public class ActorRepositoryImpl implements ActorRepository {
         // selectBatchIds 而非循环 selectById：推送一条消息要补发送者信息，
         // 群聊场景下循环查会产生 N 次往返（N+1 查询）。
         return mapper.selectBatchIds(actorIds);
+    }
+
+    @Override
+    public List<Actor> pageForAdmin(Long beforeId, int limit, ActorType actorType, ActorStatus status,
+                                    String handlePrefix) {
+        return mapper.selectList(Wrappers.<Actor>lambdaQuery()
+                .lt(beforeId != null, Actor::getId, beforeId)
+                .eq(actorType != null, Actor::getActorType, actorType)
+                .eq(status != null, Actor::getStatus, status)
+                // 前缀匹配而不是 LIKE '%x%'：后者用不上索引，而「查某个人」时
+                // 最左前缀本来就是自然写法（handle 是唯一键，索引有序）。
+                // 转义交给 MyBatis 的参数绑定，handle 的字符集限定为 [A-Za-z0-9_]，
+                // 不含 % 与 _ 之外的通配符风险；这里仍用 rightLike 以保证只有右侧通配。
+                .likeRight(handlePrefix != null && !handlePrefix.isBlank(),
+                        Actor::getHandle, handlePrefix)
+                .orderByDesc(Actor::getId)
+                .last("LIMIT " + Math.max(1, limit)));
     }
 
     /**

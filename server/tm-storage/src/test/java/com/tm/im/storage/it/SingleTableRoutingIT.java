@@ -66,7 +66,8 @@ class SingleTableRoutingIT {
      */
     private static final List<String> NON_SHARDED = List.of(
             "actor", "actor_secret", "agent_profile", "conversation", "conversation_member",
-            "friendship", "post", "post_like", "post_comment", "feed_item", "media");
+            "friendship", "post", "post_like", "post_comment", "feed_item", "media",
+            "admin_user", "admin_session", "admin_audit_log");
 
     @Autowired
     private DataSource dataSource;

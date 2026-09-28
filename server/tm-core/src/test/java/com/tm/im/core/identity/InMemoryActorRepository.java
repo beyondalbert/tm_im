@@ -91,4 +91,19 @@ class InMemoryActorRepository implements ActorRepository {
     public void update(Actor actor) {
         byId.put(actor.getId(), actor);
     }
+
+    @Override
+    public List<Actor> pageForAdmin(Long beforeId, int limit, com.tm.im.domain.enums.ActorType actorType,
+                                    com.tm.im.domain.enums.ActorStatus status, String handlePrefix) {
+        // 本替身只服务于账号注册与鉴权用例，后台列表在这里不会被调用。
+        // 仍然给一个「说得清楚」的实现而不是 UnsupportedOperationException：
+        // 后者在别人真用到时表现为测试报错，而报错信息指向替身而不指向用例。
+        return byId.values().stream()
+                .filter(a -> beforeId == null || a.getId() < beforeId)
+                .filter(a -> actorType == null || a.getActorType() == actorType)
+                .filter(a -> status == null || a.getStatus() == status)
+                .sorted(Comparator.comparing(Actor::getId).reversed())
+                .limit(Math.max(1, limit))
+                .toList();
+    }
 }

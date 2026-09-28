@@ -85,6 +85,15 @@ public enum ErrorCode {
      * 而那个误判是<b>破坏性</b>的（客户端会删掉本地会话）。
      */
     TARGET_NOT_MEMBER(40908, "target not a member", false),
+    /**
+     * 后台账号重名。
+     *
+     * <p>它与 {@link #HANDLE_EXISTS}（{@code 40005}）看着重复，实际上不是：
+     * handle 是参与者的公开标识、由用户自选且随时可被搜到；后台账号用户名只有运维可见，
+     * 而且它进的是另一套身份体系（{@code admin_user}）。共用一个码会让后台的错误
+     * 文案出现在对外文档里，而两者要提示的东西完全不同。
+     */
+    ADMIN_USERNAME_EXISTS(40909, "admin username exists", false),
 
     // ======================= 限流 42900-42999 =======================
     RATE_LIMIT_EXCEEDED(42901, "rate limit exceeded", true),

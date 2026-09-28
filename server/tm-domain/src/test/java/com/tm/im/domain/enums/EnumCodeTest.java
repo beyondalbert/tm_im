@@ -58,9 +58,14 @@ class EnumCodeTest {
         assertThat(enums)
                 .as("扫描结果为空说明目录写错了，测试会假通过")
                 .isNotEmpty();
+        // 这一句与上面的「不写死类名」不矛盾，两者抓的是不同的东西：
+        // 扫描保证新增枚举一定被下面两个测试校验；而这份清单是「落库枚举的登记表」，
+        // 新增枚举时必须有人来看一眼——因为每加一个枚举都意味着 DDL 里多/少了一列，
+        // 而「多出来的枚举到底是新表还是写错了」只能由人回答，扫描回答不了。
         assertThat(enums).extracting(Class::getSimpleName).containsExactlyInAnyOrder(
-                "ActorStatus", "ActorType", "ConvType", "FriendshipStatus",
-                "MemberRole", "MessageType", "PushMode", "SecretType", "Visibility");
+                "ActorStatus", "ActorType", "AdminRole", "AdminStatus", "ConvType",
+                "FriendshipStatus", "MemberRole", "MessageType", "PushMode", "SecretType",
+                "Visibility");
     }
 
     @Test

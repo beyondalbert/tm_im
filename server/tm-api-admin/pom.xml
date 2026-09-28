@@ -19,6 +19,14 @@
       <groupId>com.tm.im</groupId>
       <artifactId>tm-core</artifactId>
     </dependency>
+    <!-- 与用户端共用响应信封与 Bearer 解析。只共用这两件事：
+         tm-api-user 是**不能**被依赖的——那个 JAR 里全是用户端接口，
+         把管理接口所在的进程与它绑在一起，等于让用户端的漏洞面
+         直接变成「能封任何人号」的能力（DESIGN §2.4）。 -->
+    <dependency>
+      <groupId>com.tm.im</groupId>
+      <artifactId>tm-api-common</artifactId>
+    </dependency>
     <dependency>
       <groupId>org.springframework.boot</groupId>
       <artifactId>spring-boot-starter-web</artifactId>
@@ -30,6 +38,18 @@
     <dependency>
       <groupId>org.springframework.boot</groupId>
       <artifactId>spring-boot-starter-test</artifactId>
+      <scope>test</scope>
+    </dependency>
+    <!-- 复用 tm-core 测试里的内存替身（后台三张表 / Actor / Post / AgentProfile）。
+         本模块的用例针对的是 HTTP 层契约（信封、错误码、参数校验、分页字段、
+         snake_case），而这一层要用到真正的 AdminService——它是「控制器到仓储」
+         中间那段唯一的实现，替换成 mock 等于验证一个不存在的服务。
+         替身各写一份的话，分页谓词与审计过滤迟早两边不一致。 -->
+    <dependency>
+      <groupId>com.tm.im</groupId>
+      <artifactId>tm-core</artifactId>
+      <version>${project.version}</version>
+      <type>test-jar</type>
       <scope>test</scope>
     </dependency>
   </dependencies>

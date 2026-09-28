@@ -57,6 +57,8 @@ ENUM_MAP: dict[tuple[str, str], tuple[str, list[tuple[int, str]]]] = {
     ("message", "msg_type"): ("MessageType", [(1, "TEXT"), (2, "IMAGE"), (3, "SYSTEM")]),
     ("friendship", "status"): ("FriendshipStatus", [(1, "PENDING"), (2, "ACCEPTED"), (3, "BLOCKED")]),
     ("post", "visibility"): ("Visibility", [(1, "PUBLIC"), (2, "FRIENDS_ONLY")]),
+    ("admin_user", "role"): ("AdminRole", [(1, "SUPER"), (2, "OPS")]),
+    ("admin_user", "status"): ("AdminStatus", [(1, "ACTIVE"), (2, "DISABLED")]),
 }
 
 TYPE_MAP = {

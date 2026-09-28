@@ -5,6 +5,7 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.PropertyNamingStrategies;
 import com.fasterxml.jackson.databind.SerializationFeature;
 import com.fasterxml.jackson.datatype.jsr310.JavaTimeModule;
+import com.tm.im.api.common.web.ApiExceptionHandler;
 import com.tm.im.api.user.auth.CurrentActor;
 import com.tm.im.api.user.auth.CurrentActorArgumentResolver;
 import com.tm.im.common.api.ApiResponse;
@@ -343,6 +344,12 @@ class ApiExceptionHandlerTest {
         @Override
         public void update(Actor actor) {
             throw new UnsupportedOperationException("本测试不写库");
+        }
+
+        @Override
+        public List<Actor> pageForAdmin(Long beforeId, int limit, ActorType actorType,
+                                        ActorStatus status, String handlePrefix) {
+            return List.of();
         }
     }
 

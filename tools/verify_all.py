@@ -39,7 +39,7 @@ CHECKS = [
     ("config-tmpl", "verify_config_template.py", "配置模板与 @ConfigurationProperties 一致", "pyyaml", []),
     ("mutate",   "mutate_schema.py",            "变异测试：证明校验器不是摆设",   "sqlglot", []),
     ("mutate-deps", "mutate_sharding_deps.py",   "变异测试：缺 ShardingSphere 依赖必被捕获", "", []),
-    ("mutate-cfg", "mutate_config_template.py",  "变异测试：模板校验器的 5 类盲区", "pyyaml", []),
+    ("mutate-cfg", "mutate_config_template.py",  "变异测试：模板校验器的 7 类盲区", "pyyaml", []),
     # 命令字契约是手写三份的（proto / 接入文档 / 服务端 Frames），三份之间没有任何
     # 编译期约束。CMD_SYNC 曾经一个编号同时充当请求与响应，就是这么溜进去的。
     ("mutate-cmd", "mutate_command_contract.py", "变异测试：命令字契约三方一致校验器不是摆设", "protobuf", []),
@@ -48,6 +48,11 @@ CHECKS = [
     # 外部服务的那 14 条；第 15 条（转让群主去掉 @Transactional）要真实 MySQL，在 --services 里。
     ("mutate-member", "mutate_member_rules.py",
      "变异测试：群成员管理的 14 条规则都有测试钉住", "", ["--unit-only"]),
+    # 后台的规则与群成员规则同一性质：改坏了接口照样返回 200。
+    # 越权判断、分页夹取、码值校验、停用删会话、失败计数——它们都不会让任何
+    # 功能用例变红，只会让后台看起来正常（每变异跑一次 mvn，约 80 秒）。
+    ("mutate-admin", "mutate_admin_api.py",
+     "变异测试：后台的 6 条规则都有测试钉住", "", []),
     # 续传读取路径的规则都属于「改坏了照样能跑、而且看起来更正常」那一类：
     # 少取一行不报错、has_more=true 时多回一帧 END 不报错、失败时静默回空结果更不报错。
     # 它们只能靠测试钉住，而测试本身也需要被验证（约 2.5 分钟：每个变异跑一次 mvn）。
@@ -124,7 +129,7 @@ def main() -> int:
     if args.quick:
         checks = [c for c in checks
                   if c[0] not in ("docs", "mutate", "mutate-deps", "mutate-cfg", "mutate-cmd",
-                                  "mutate-member")]
+                                  "mutate-member", "mutate-admin")]
     checks = list(checks) + (list(SERVICE_CHECKS) if args.services else [])
     print(BOLD("tm_im 全量自检"))
     print(DIM(f"  仓库: {REPO}"))

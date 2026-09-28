@@ -120,6 +120,16 @@ public class PostRepositoryImpl implements PostRepository {
                 .last("LIMIT " + Math.max(1, limit)));
     }
 
+    @Override
+    public List<Post> pageForModeration(Long beforeId, int limit) {
+        // ORDER BY id DESC 走主键（聚簇索引），不需要额外索引，也不会回表：
+        // post 的读取本来就要把绝大多数列取出来（渲染动态要正文与图片）。
+        return mapper.selectList(Wrappers.<Post>lambdaQuery()
+                .lt(beforeId != null, Post::getId, beforeId)
+                .orderByDesc(Post::getId)
+                .last("LIMIT " + Math.max(1, limit)));
+    }
+
     // ------------------------------------------------------------------ 内部
 
     /**

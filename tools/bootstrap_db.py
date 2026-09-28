@@ -263,7 +263,7 @@ def main() -> int:
     biz = sorted(t for t in have if not re.fullmatch(r"message_\d+", t))
     expect_biz = {"actor", "actor_secret", "agent_profile", "conversation",
                   "conversation_member", "friendship", "post", "post_like", "post_comment",
-                  "feed_item", "media"}
+                  "feed_item", "media", "admin_user", "admin_session", "admin_audit_log"}
 
     if len(msg_tables) == 16:
         ok(f"分片表 16 张齐全: message_0 .. message_15")
@@ -272,7 +272,9 @@ def main() -> int:
 
     miss = expect_biz - set(biz)
     if not miss:
-        ok(f"业务表 9 张齐全")
+        # 数量从集合本身算：写死的数字会在加了表之后变成一句谎话
+        #（这里曾经写着「业务表 9 张齐全」，而集合里早就是 11 张了）。
+        ok(f"业务表 {len(expect_biz)} 张齐全")
     else:
         bad(f"缺少业务表: {sorted(miss)}")
 

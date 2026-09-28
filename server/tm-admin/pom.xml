@@ -20,6 +20,18 @@
       <artifactId>tm-api-admin</artifactId>
     </dependency>
 
+    <!-- 集成测试设施（ItEnv）：真实 MySQL / Redis 的坐标只应该有一份，
+         与 tm-app / tm-core / tm-channel 同一做法。
+         注意这里只引 storage 的测试支撑，**不引 tm-app 的任何东西**：
+         后台与被测边界（用户端应用）必须彻底分开。 -->
+    <dependency>
+      <groupId>com.tm.im</groupId>
+      <artifactId>tm-storage</artifactId>
+      <version>${project.version}</version>
+      <type>test-jar</type>
+      <scope>test</scope>
+    </dependency>
+
     <dependency>
       <groupId>org.springframework.boot</groupId>
       <artifactId>spring-boot-starter-actuator</artifactId>

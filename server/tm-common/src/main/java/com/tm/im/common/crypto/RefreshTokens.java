@@ -1,8 +1,6 @@
 package com.tm.im.common.crypto;
 
-import java.security.SecureRandom;
 import java.util.Base64;
-
 /**
  * refresh_token 的生成与规范化（02-auth.md §2.3）。
  *
@@ -27,19 +25,20 @@ public final class RefreshTokens {
     public static final String PREFIX = "rt_";
 
     /** 随机部分字节数。256 位，暴力枚举不可行。 */
-    static final int RANDOM_BYTES = 32;
-
-    private static final SecureRandom RANDOM = new SecureRandom();
-    private static final Base64.Encoder ENCODER = Base64.getUrlEncoder().withoutPadding();
+    static final int RANDOM_BYTES = OpaqueToken.RANDOM_BYTES;
 
     private RefreshTokens() {
     }
 
-    /** 生成一个新凭证（明文）。这是唯一一次能拿到明文的机会。 */
+    /**
+     * 生成一个新凭证（明文）。这是唯一一次能拿到明文的机会。
+     *
+     * <p>实现委托给 {@link OpaqueToken}（与后台会话 {@code adm_} 同一份代码）：
+     * 两者的形状、熵与「只存哈希」完全一样，差别只有前缀——
+     * 两份实现里随机长度迟早会漂移，而那种漂移不会报错，只会静默降低熵。
+     */
     public static String generate() {
-        byte[] raw = new byte[RANDOM_BYTES];
-        RANDOM.nextBytes(raw);
-        return PREFIX + ENCODER.encodeToString(raw);
+        return OpaqueToken.generate(PREFIX);
     }
 
     /**
@@ -50,6 +49,6 @@ public final class RefreshTokens {
      * 在这里区分只会让攻击者能用响应差异探测凭证格式。
      */
     public static String hash(String plain) {
-        return Digests.sha256Hex(plain);
+        return OpaqueToken.hash(plain);
     }
 }

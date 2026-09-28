@@ -245,6 +245,34 @@ tm:
     # 超限时记 WARN 并继续：少排除的人偏多，顶多重复下发部分好友的动态。
     friend-set-cap: 2000
 
+  # ---------- 管理后台（M9，仅 tm-admin.jar） ----------
+  # 这一段只被 tm-admin 读；tm-app 里它存在但没人用（两个应用共用同一份部署配置）。
+  admin:
+    # 后台会话有效期。比用户端 JWT（2 小时）长：后台是「可即时吊销」的库里会话，
+    # 8 小时略长于一个工作日——让运维一天登录一次。
+    session-ttl: 8h
+    # 连续登录失败多少次后锁定账号。后台账号数量少、而它一旦失守的损失面是全站，
+    # 所以这里比用户端严格；计数落在库里（admin_user.failed_attempts）。
+    max-login-failures: 5
+    # 锁定持续多久（到点自动解锁）。
+    lockout-duration: 15m
+    # 后台口令长度下限。比用户端的 8 位长：后台没有验证码/二次验证这道补充防线。
+    min-password-length: 12
+    # 后台列表的默认/最大页大小（与大 V 无关：后台的列表本来就不面向用户）。
+    page-size: 20
+    max-page-size: 100
+    # 第一个后台账号：**只在 admin_user 表为空时使用一次**，之后配置失效。
+    # 没有它就只能手工 INSERT（而 password_hash 的格式是
+    # pbkdf2-sha256$迭代数$盐$摘要，拼错的后果是「怎么登都登不上」）。
+    # 初始化完成后请从配置里删掉这两项，并在后台里改口令。
+    #
+    # 三项都留空也能启动：服务不建任何后台账号，只记一条 WARN，
+    # 于是「能起但没人能登录」——要么填上，要么确定不需要后台。
+    # 显示名留空则用用户名。
+    bootstrap-username: ${TM_ADMIN_BOOTSTRAP_USERNAME:}
+    bootstrap-password: ${TM_ADMIN_BOOTSTRAP_PASSWORD:}
+    bootstrap-display-name: ${TM_ADMIN_BOOTSTRAP_DISPLAY_NAME:}
+
 logging:
   level:
     root: INFO

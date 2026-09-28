@@ -52,6 +52,16 @@ public final class PageCursors {
     /** §6.6 评论列表的游标。 */
     private static final String TYPE_PLAZA_COMMENT = "pcmt";
 
+    // -------- 管理后台（M9）：四个列表都只带一个 id --------
+    //
+    // 它们的形状完全一样，照理可以只用一个类型——但那正是本类开头说的那个坑：
+    // 把「审计日志的第二页」的游标贴到「用户列表」上不会报错，只会返回一个
+    // 内容不对的列表。四个类型标签的代价是四行常量，换来的是贴错就报 40010。
+    private static final String TYPE_ADMIN_ACTOR = "aact";
+    private static final String TYPE_ADMIN_POST = "apst";
+    private static final String TYPE_ADMIN_AUDIT = "alog";
+    private static final String TYPE_ADMIN_ACCOUNT = "aadm";
+
     private PageCursors() {
     }
 
@@ -288,6 +298,64 @@ public final class PageCursors {
             throw invalid(cursor, "cid（评论 id）必须为正整数");
         }
         return new PlazaCommentCursor(at, cid);
+    }
+
+    // ------------------------------------------------------------------ 管理后台（M9）
+
+    /**
+     * 后台列表的游标：只有一个 {@code id}。
+     *
+     * <p><b>为什么不需要像信息流那样带一对 {@code (时间, id)}</b>：后台列表按
+     * {@code id} 倒序，而 {@code id} 是 Snowflake——单调递增且与创建时间同序。
+     * 于是「比游标更旧的项」就是一个严格的 {@code id < ?}，没有同毫秒并列的缝隙，
+     * 也不会出现「翻页时插入新行导致重复/漏项」（新行的 id 更大，落在第一页那侧）。
+     */
+    public record AdminCursor(long id) {
+    }
+
+    public static String encodeAdminActor(long id) {
+        return encode(adminPayload(TYPE_ADMIN_ACTOR, id));
+    }
+
+    public static String encodeAdminPost(long id) {
+        return encode(adminPayload(TYPE_ADMIN_POST, id));
+    }
+
+    public static String encodeAdminAudit(long id) {
+        return encode(adminPayload(TYPE_ADMIN_AUDIT, id));
+    }
+
+    public static String encodeAdminAccount(long id) {
+        return encode(adminPayload(TYPE_ADMIN_ACCOUNT, id));
+    }
+
+    public static AdminCursor decodeAdminActor(String cursor) {
+        return decodeAdmin(cursor, TYPE_ADMIN_ACTOR);
+    }
+
+    public static AdminCursor decodeAdminPost(String cursor) {
+        return decodeAdmin(cursor, TYPE_ADMIN_POST);
+    }
+
+    public static AdminCursor decodeAdminAudit(String cursor) {
+        return decodeAdmin(cursor, TYPE_ADMIN_AUDIT);
+    }
+
+    public static AdminCursor decodeAdminAccount(String cursor) {
+        return decodeAdmin(cursor, TYPE_ADMIN_ACCOUNT);
+    }
+
+    private static String adminPayload(String type, long id) {
+        return "{\"v\":" + VERSION + ",\"t\":\"" + type + "\",\"id\":" + id + "}";
+    }
+
+    private static AdminCursor decodeAdmin(String cursor, String type) {
+        JsonNode node = parse(cursor, type);
+        long id = requireLong(node, "id", cursor);
+        if (id <= 0) {
+            throw invalid(cursor, "id 必须为正整数");
+        }
+        return new AdminCursor(id);
     }
 
     // ------------------------------------------------------------------ 内部

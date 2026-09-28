@@ -1,5 +1,6 @@
 package com.tm.im.api.user.auth;
 
+import com.tm.im.api.common.auth.BearerCredential;
 import com.tm.im.core.identity.AuthContext;
 import com.tm.im.core.identity.IdentityService;
 import jakarta.servlet.http.HttpServletRequest;

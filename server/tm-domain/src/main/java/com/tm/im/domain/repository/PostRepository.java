@@ -88,4 +88,18 @@ public interface PostRepository {
      * 这个方法的谓词是 {@code NOT IN (...)}，列表长度直接决定 SQL 的长度。
      */
     List<Post> pagePublicExcluding(Collection<Long> excludeAuthors, Cursor cursor, int limit);
+
+    /**
+     * 后台的内容列表（M9）：全量、按 {@code id} 倒序分页，{@code beforeId} 为 null 表示第一页。
+     *
+     * <p><b>它确实推翻了本接口开头那句「没有分页查全部」</b>，所以有义务说清楚为什么。
+     * 那句话防的是「用户端出现一条全表扫描的读路径」——不需要任何条件、不需要索引、
+     * 在本地数据量下看起来毫秒级返回，上了量之后成为慢查询。而这个方法的调用方是
+     * 后台的审核页：它本来就要看「最新的内容」而不管作者是谁，QPS 以「天」计，
+     * 而且 {@code ORDER BY id DESC} 走的是主键聚簇索引——慢查询风险在服务端可控
+     * （DESIGN §10.6 的 SLO 监控会盯它），而风险由权限隔开的那一侧承担。
+     *
+     * <p>仍不提供「按任意列搜索」：那才是真的全表扫描入口。
+     */
+    List<Post> pageForModeration(Long beforeId, int limit);
 }

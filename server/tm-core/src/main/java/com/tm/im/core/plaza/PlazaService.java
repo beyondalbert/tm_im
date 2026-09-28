@@ -75,7 +75,7 @@ import java.util.concurrent.ExecutorService;
  * 好过悄悄改掉一个已经被文档写死的公式。
  */
 @Service
-public class PlazaService {
+public class PlazaService implements PostDeletionPort {
 
     private static final Logger log = LoggerFactory.getLogger(PlazaService.class);
 
@@ -366,12 +366,39 @@ public class PlazaService {
             throw new TmException(ErrorCode.PERMISSION_DENIED,
                     "只有作者能删自己的动态 postId=" + postId + " author=" + post.getAuthorId());
         }
+        cascadeDelete(post);
+    }
+
+    /**
+     * 后台删帖（M9）。
+     *
+     * <p><b>与 {@link #delete} 的差别只有一道判断</b>：不做「只有作者能删」的检查，
+     * 其余（连带清收件箱、点赞、评论）完全一样。写到这个方法是故意的：
+     * 审核删帖如果另走一套，两套代码里必有一套先长出「只删了 post 没删 feed_item」
+     * 这类遗漏，而那个遗漏的表现是「已删除的动态仍能被好友在信息流里看到并发起点赞」——
+     * 点赞会写进一个不存在的 post 的计数。
+     */
+    @Override
+    @Transactional
+    public void deleteAsAdmin(long postId) {
+        cascadeDelete(requirePost(postId));
+    }
+
+    /**
+     * 级联清理。
+     *
+     * <p>顺序是「先清引用方，再删被引用方」：{@code feed_item} / {@code post_like} /
+     * {@code post_comment} 都有 {@code post_id} 索引，任何一个失败都不会留下
+     * 「post 没了但引用还在」的状态（那个状态下点赞的计数更新会打在不存在的行上）。
+     */
+    private void cascadeDelete(Post post) {
+        long postId = post.getId();
         int feedRows = feedItems.deleteByPostId(postId);
         int likeRows = likes.deleteByPostId(postId);
         int commentRows = comments.deleteByPostId(postId);
         posts.deleteById(postId);
         log.info("动态已删除 postId={} author={} 连带 feedItem={} like={} comment={}",
-                postId, actorId, feedRows, likeRows, commentRows);
+                postId, post.getAuthorId(), feedRows, likeRows, commentRows);
     }
 
     // ================================================================== §6.5 点赞

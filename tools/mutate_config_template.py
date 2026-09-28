@@ -3,7 +3,7 @@
 """变异测试：证明「模板一致性校验器」不是摆设。
 
 一个从没红过的校验器与没有校验器是等价的 —— 它只是让 `verify_all` 多打一行 OK。
-所以这里对模板注入 6 类**真实发生过**的缺陷，逐个确认校验器会失败，
+所以这里对模板注入 7 类**真实发生过**的缺陷，逐个确认校验器会失败，
 并且失败信息里能指出是哪个键。
 
 注入的缺陷都只写进临时文件，绝不碰仓库里的模板。
@@ -53,6 +53,20 @@ def mutate_drop_section(text: str) -> str:
     return re.sub(r"^  identity:\n(?:    .*\n|\n)*", "", text, count=1, flags=re.M)
 
 
+def mutate_empty_placeholder_on_nonempty_default(text: str) -> str:
+    """把『代码里有非空默认值』的项改成 ``${ENV:}``（不写默认值）。
+
+    这一类与 ``tm.admin.bootstrap.*`` 的长相只差一处：那三项在代码里的默认值
+    本来就是空串，``${ENV:}`` 绑出来与之一致，所以是合法的；而
+    ``heartbeat-idle-seconds`` 代码默认值是 30，``${ENV:}`` 绑成 null →
+    启动时绑定失败。校验器必须只放过前者、照旧拦住后者。
+    （这个分支早年对两类都放行/都拦住，因为当时仓库里还没有「空串默认」的 String 项。）
+    """
+    return re.sub(r"^(\s*)heartbeat-idle-seconds: 30",
+                  r"\g<1>heartbeat-idle-seconds: ${TM_NETTY_HEARTBEAT_IDLE_SECONDS:}",
+                  text, count=1, flags=re.M)
+
+
 def mutate_node_id_hardcoded(text: str) -> str:
     """给节点标识一个固定默认值。
 
@@ -71,6 +85,8 @@ MUTATIONS = [
     ("密钥被写了默认值", mutate_secret_default, "tm.identity.jwt-secret"),
     ("整段配置缺失", mutate_drop_section, "tm.identity"),
     ("节点标识被写死默认值", mutate_node_id_hardcoded, "tm.node.id"),
+    ("非空默认值被写成 ${ENV:}", mutate_empty_placeholder_on_nonempty_default,
+     "tm.netty.heartbeat-idle-seconds"),
 ]
 
 

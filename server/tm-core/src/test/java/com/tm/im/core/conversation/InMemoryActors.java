@@ -79,4 +79,22 @@ public class InMemoryActors implements ActorRepository {
     public void update(Actor actor) {
         byId.put(actor.getId(), actor);
     }
+
+    @Override
+    public List<Actor> pageForAdmin(Long beforeId, int limit, ActorType actorType, ActorStatus status,
+                                    String handlePrefix) {
+        // 与真实现同一套谓词与同一套排序（id 倒序），只是把 SQL 换成流：
+        // 替身与真实现一旦在这里分叉，后台列表的用例就会变成「验证替身」而不是验证规则。
+        String prefix = handlePrefix == null || handlePrefix.isBlank()
+                ? null : handlePrefix.toLowerCase(Locale.ROOT);
+        return byId.values().stream()
+                .filter(a -> beforeId == null || a.getId() < beforeId)
+                .filter(a -> actorType == null || a.getActorType() == actorType)
+                .filter(a -> status == null || a.getStatus() == status)
+                .filter(a -> prefix == null || (a.getHandle() != null
+                        && a.getHandle().toLowerCase(Locale.ROOT).startsWith(prefix)))
+                .sorted((x, y) -> Long.compare(y.getId(), x.getId()))
+                .limit(Math.max(1, limit))
+                .toList();
+    }
 }

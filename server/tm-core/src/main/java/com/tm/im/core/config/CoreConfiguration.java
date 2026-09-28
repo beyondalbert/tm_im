@@ -1,6 +1,7 @@
 package com.tm.im.core.config;
 
 import com.tm.im.common.id.IdGenerator;
+import com.tm.im.core.admin.AdminProperties;
 import com.tm.im.common.id.SnowflakeIdGenerator;
 import com.tm.im.core.agent.AgentProperties;
 import com.tm.im.core.conversation.ConversationProperties;
@@ -13,6 +14,7 @@ import org.slf4j.LoggerFactory;
 import org.springframework.boot.context.properties.EnableConfigurationProperties;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
+import org.springframework.context.annotation.Lazy;
 
 import java.net.InetAddress;
 import java.net.UnknownHostException;
@@ -35,7 +37,7 @@ import java.util.concurrent.atomic.AtomicInteger;
 @Configuration
 @EnableConfigurationProperties({SnowflakeProperties.class, IdentityProperties.class,
         TimeProperties.class, MessageProperties.class, ConversationProperties.class,
-        FriendProperties.class, AgentProperties.class, PlazaProperties.class})
+        FriendProperties.class, AgentProperties.class, PlazaProperties.class, AdminProperties.class})
 public class CoreConfiguration {
 
     private static final Logger log = LoggerFactory.getLogger(CoreConfiguration.class);
@@ -47,7 +49,22 @@ public class CoreConfiguration {
         return new SnowflakeIdGenerator(properties.nodeId(hostname()));
     }
 
+    /**
+     * JWT 签发与校验。
+     *
+     * <p><b>为什么标 {@code @Lazy}</b>：这把密钥能伪造任意用户的 token，
+     * 所以「不需要它的进程就不该持有它」——{@code tm-admin} 就是这样的进程
+     * （它不扫 {@code com.tm.im.core.identity}，也不配 {@code tm.identity.jwt-secret}）。
+     * 而本方法是 {@code @Configuration} 里的工厂方法，默认会在启动时就被调用，
+     * 于是一个「不用 JWT 的后台」会因为别人的 Bean 而拒绝启动。
+     *
+     * <p>{@code @Lazy} 把「什么时候真正需要它」还给使用方：
+     * {@code tm-app} 里的 {@code IdentityService} 是饿汉 Bean，会立刻请求它，
+     * 所以{\@code tm-app} 缺密钥时**照旧启动失败**（那是有意的，见 02-auth.md）；
+     * 而后台里没人请求它，于是它根本不会被创建。
+     */
     @Bean
+    @Lazy
     public JwtTokenService jwtTokenService(IdentityProperties properties) {
         return new JwtTokenService(properties.getJwtSecret());
     }

@@ -45,4 +45,33 @@
       <scope>test</scope>
     </dependency>
   </dependencies>
+
+  <build>
+    <plugins>
+      <!-- 把 src/test 里的内存替身（InMemoryAdminStore / InMemoryActors /
+           InMemoryPosts / InMemoryAgentProfiles）打成 test-jar，供 tm-api-admin
+           的 HTTP 层用例复用。
+
+           为什么不各写一份：那些替身里钉了一堆「与服务层同源的规则」
+           （分页严格取更旧的行、pageForAdmin 的谓词、审计过滤的四个参数），
+           两个副本一旦漂移，后台接口的用例就变成了「验证替身」。
+
+           绑在 process-test-classes 而不是 package：本项目的测试入口是
+           `mvn test`（不跑 package），绑 package 的话下游模块会在解析
+           test-jar 依赖时失败（与 tm-storage/pom.xml 里那段注释同一个理由）。 -->
+      <plugin>
+        <groupId>org.apache.maven.plugins</groupId>
+        <artifactId>maven-jar-plugin</artifactId>
+        <executions>
+          <execution>
+            <id>test-jar</id>
+            <phase>process-test-classes</phase>
+            <goals>
+              <goal>test-jar</goal>
+            </goals>
+          </execution>
+        </executions>
+      </plugin>
+    </plugins>
+  </build>
 </project>

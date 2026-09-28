@@ -256,7 +256,8 @@ Agent SDK  ─┘
 
 ### 5.1 进程与端口布局
 
-两个应用都是**单 JAR、单进程**，每个进程内同时运行 **Tomcat（REST/静态）+ Netty（长连接）**：
+两个应用都是**单 JAR、单进程**。`tm-app` 进程内同时运行 **Tomcat（REST/静态）+ Netty（长连接）**；
+`tm-admin` 只有 Tomcat —— 后台不参与任何会话，不需要那一整套协议解析（见 §13.2）：
 
 ```
 tm-app.jar（用户应用）
@@ -568,7 +569,8 @@ rules:
           algorithm-expression: message_${conv_id % 16}
 
   # 非分片表（actor/actor_secret/agent_profile/conversation/conversation_member
-  #              friendship/post/feed_item/media）——必须用 "*.*" 显式声明，理由见下方注
+  #              friendship/post/post_like/post_comment/feed_item/media
+  #              admin_user/admin_session/admin_audit_log）——必须用 "*.*" 显式声明，理由见下方注
   - !SINGLE
     tables:
       - "*.*"
@@ -825,6 +827,82 @@ CREATE TABLE media (
 - **广场的计数是冗余列**（`post.like_count` / `comment_count`）：信息流每页 N 条都带这两个值，
   现算就是 2N 次聚合；代价是它们必须与明细同事务更新（见 §11.3）。
 - **`DATETIME(3)` 毫秒精度**：IM 场景秒级精度不够。
+
+### 9.5 管理后台（M9）
+
+```sql
+-- 后台身份**不进 actor 表**：管理员没有 handle、没有好友、不发消息，
+-- 它不是「一种参与者」。若给 actor 加一个 is_admin 列，权限判断会退化成
+-- 「看某一列的值」，而对等模型最怕的就是这种特例（§13.2 有完整对照表）。
+CREATE TABLE admin_user (
+  id              BIGINT       NOT NULL COMMENT 'Snowflake',
+  username        VARCHAR(64)  NOT NULL,
+  display_name    VARCHAR(128) NOT NULL,
+  password_hash   VARCHAR(255) NOT NULL COMMENT 'pbkdf2-sha256$迭代数$盐$摘要（与人类账号同一实现）',
+  role            TINYINT      NOT NULL DEFAULT 2 COMMENT '1=SUPER 2=OPS',
+  status          TINYINT      NOT NULL DEFAULT 1 COMMENT '1=ACTIVE 2=DISABLED',
+  failed_attempts INT          NOT NULL DEFAULT 0 COMMENT '连续登录失败次数，成功即清零',
+  locked_until    DATETIME(3)  NULL COMMENT '锁定到什么时候（防在线爆破）',
+  created_at      DATETIME(3)  NOT NULL,
+  last_login_at   DATETIME(3)  NULL,
+  PRIMARY KEY (id),
+  UNIQUE KEY uk_username (username)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+
+-- 会话在库里，而不是给管理员签发 JWT：JWT 的吊销需要一张黑名单表，
+-- 而黑名单表就是本表减去「签发」那一步；后台账号只有几个人、QPS 以「天」计，
+-- 一次按哈希的点查完全不是成本，换来的是「停用/登出立刻生效」。
+CREATE TABLE admin_session (
+  id           BIGINT       NOT NULL,
+  admin_id     BIGINT       NOT NULL,
+  token_hash   CHAR(64)     NOT NULL COMMENT 'SHA-256(adm_…)，明文只在登录响应里回一次',
+  expires_at   DATETIME(3)  NOT NULL,
+  created_at   DATETIME(3)  NOT NULL,
+  last_seen_at DATETIME(3)  NULL,
+  ip           VARCHAR(64)  NULL,
+  user_agent   VARCHAR(255) NULL,
+  PRIMARY KEY (id),
+  UNIQUE KEY uk_token_hash (token_hash),
+  KEY idx_admin (admin_id) COMMENT '停用管理员时踢掉全部会话',
+  KEY idx_expires (expires_at) COMMENT '清理过期会话'
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+
+-- admin_name 是**冗余快照**：审计的价值在事后可读，只存 admin_id 的话，
+-- 账号被删或改名之后这行记录就只剩一个看不懂的数字——而那正是最需要它的时候。
+-- detail 用 JSON：后台动作会持续增加，「再加一列」意味着又一次 DDL 变更。
+CREATE TABLE admin_audit_log (
+  id          BIGINT       NOT NULL,
+  admin_id    BIGINT       NOT NULL,
+  admin_name  VARCHAR(64)  NOT NULL COMMENT '冗余快照：账号改名/删除后仍可读',
+  action      VARCHAR(48)  NOT NULL COMMENT 'ADMIN_LOGIN_FAILED / ACTOR_STATUS / POST_DELETE …',
+  target_type VARCHAR(32)  NULL COMMENT 'ACTOR / POST / AGENT / ADMIN',
+  target_id   BIGINT       NULL,
+  detail      JSON         NULL COMMENT '结构化详情，便于以后加字段',
+  ip          VARCHAR(64)  NULL,
+  created_at  DATETIME(3)  NOT NULL,
+  PRIMARY KEY (id),
+  KEY idx_admin_time (admin_id, created_at),
+  KEY idx_target_time (target_type, target_id, created_at),
+  KEY idx_time (created_at)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+```
+
+四处取舍（最后一条是「选择不建」的表）：
+
+- **口令与 `actor_secret` 同实现、不同表**：格式是 `pbkdf2-sha256$迭代数$盐$摘要`
+  （自带迭代数 → 升级迭代数是一个可以在登录时顺带完成的动作）。但它们不能同一张表：
+  `actor_secret` 里每一行都对应一个「能收发消息的参与者」，两边的生命周期与吊销方式完全不同。
+- **`admin_session.token_hash` 是 `CHAR(64)`** 而不是 `VARCHAR`：列长固定，索引也不必带长度前缀；
+  落库的只有 SHA-256，明文 `adm_…` 只在登录响应里回一次（与 api_key 同一约定）。
+- **失败计数与锁定时间落列，而不是放进 Redis**：多实例部署时，
+  按实例计数等于「每个实例各给 5 次机会」，而单实例开发时看不出来。
+- **不建 `admin_role` 表**：两个角色、且判别逻辑在一处（`AdminService#requireSuper`），
+  一张两行的表只会多一次 join；角色要长成第三种时再说。不建外键（与其余表一致）：
+  审计行不能因为账号被删而消失。
+
+这三张表**不带分片**，与非分片表的清单一起写在 `deploy/conf/sharding.yaml` 的 `*.*` 里
+（`SingleTableRoutingIT` 会断言它们在分片驱动下真的走单表路由）；
+DDL 由 `tools/gen_schema.py` 生成，`tools/verify_schema.py` 逐条比对。
 
 ---
 
@@ -1121,6 +1199,7 @@ tm_im/
 │   ├─ tm-storage/                  # MyBatis-Plus 仓储实现 + sharding.yaml
 │   ├─ tm-core/                     # 业务服务：identity/message/conversation/social/feed/media
 │   ├─ tm-channel/                  # ★ 自研 Netty：编解码、鉴权、连接表、推送
+│   ├─ tm-api-common/               # 两个 REST 模块共用：响应信封、Bearer 解析
 │   ├─ tm-api-user/                 # /v1 REST（用户 + Agent 共用）
 │   ├─ tm-api-admin/                # /v1/admin REST
 │   ├─ tm-app/                      # ★ 用户应用 boot（含 H5 静态资源）→ tm-app.jar
@@ -1141,12 +1220,16 @@ tm_im/
 
 ```
 tm-common ← tm-domain ← tm-storage ← tm-core ← tm-channel
-                                              ← tm-api-user
-                                              ← tm-api-admin
+                                              ← tm-api-common ← tm-api-user
+                                                              ← tm-api-admin
 tm-app  /  tm-admin  ← 装配上面全部
 ```
 
 `tm-channel`（Netty）与 `tm-api-user`（REST）**平级**，都只依赖 `tm-core`，都通过 `tm-core` 调用 `tm-storage`。这保证「同构协议」在架构上被强制——**两者无法绕过共享领域层**。
+
+`tm-api-admin` **不依赖 `tm-api-user`**，两者只共用 `tm-api-common` 里那两件事
+（`ApiResponse` 信封与 `BearerCredential` 解析）：管理接口所在的进程一旦依赖用户端模块，
+用户端每一条输入解析、每一个依赖都会变成「能封任何人号」的攻击面（§13.2）。
 
 ---
 
@@ -1177,6 +1260,24 @@ java -jar tm-app.jar \
   --spring.config.additional-location=file:/etc/tm/ \
   --sharding.url=jdbc:shardingsphere:absolutepath:/etc/tm/sharding.yaml
 ```
+
+### 13.2 管理后台的独立边界（M9）
+
+后台 API 的每一项能力都是「封任何人的号 / 删任何一条动态」，所以它的边界不能靠约定：
+
+| 面 | 做法 | 为什么不能用用户端那套 |
+|---|---|---|
+| 进程 | `tm-admin.jar` 独立应用、独立端口/子域 | 同进程就等于用户端每个解析入口都通向封号权 |
+| 令牌 | 库里会话（`admin_session`，只存 `token_hash`），8 小时 | JWT 无状态，**吊销不了**；「停用立刻生效」在后台是硬需求 |
+| 凭证前缀 | `adm_`（`sk_` = api_key、JWT 无前缀） | 三种凭证拼写相近，前缀是唯一能在日志里一眼分辨的东西 |
+| 身份模型 | `admin_user` 与 `actor` 是**两张互不相干的表** | 后台不参与会话/好友/消息；复用 Actor 会把后台行为混进用户数据 |
+| 防爆破 | 失败计数与锁定时间落在**库**里（`failed_attempts`/`locked_until`） | 放在单节点内存里 = 多实例部署时每个实例各给 5 次机会 |
+| 权限 | 账号管理整组 SUPER only；`/v1/admin/me` 例外（OPS 也要知道自己是谁） | 判据在 `AdminService` 里，不在控制器里——写在各控制器里迟早漏写一个 |
+| 留痕 | 每个写动作与业务变更**同事务**写 `admin_audit_log`，用户名快照 | 审计不是「顺便记一笔」：没有它，事后只能靠「谁可能知道口令」推断 |
+| 首个账号 | `tm.admin.bootstrap.*` 仅在 `admin_user` 表为空时生效一次 | 仓库里不放带口令的建号脚本；一次性口令没有可用的泄漏时间窗口 |
+
+这些都落在 `tm.admin.*` 配置段（`deploy/conf/application-external.yml.example` 的
+「管理后台」一节）与 `AdminProperties` 上，由 `tools/verify_config_template.py` 做一致性校验。
 
 ---
 
@@ -1240,6 +1341,36 @@ M3 的验收标准是「浏览器双开互发文字，seq 严格递增」。它�
 
 两者的共同点是：**测试自己的容器看不到**（`ItSpringConfig` 只扫 `com.tm.im.storage.repository`，
 `MockMvc` 根本不建容器），所以再多的单测也不会发现它们。
+
+### 14.2 M9 实现状态（逐项）
+
+M9 的验收标准是「可封禁、可查日志」。它拆成三半：**领域规则**（谁能做什么、
+锁几次、审计写什么）、**HTTP 契约**（错误码、分页字段、snake_case）、
+**真装配**（独立 JAR 的扫描清单、扫描不到用户端身份服务）。三者各由一层测试盯住。
+
+| 部分 | 现状 | 证据 |
+|---|---|---|
+| 后台三张表（`admin_user` / `admin_session` / `admin_audit_log`） | 已实现 | `tools/gen_schema.py`（11→14 张非分片表，`--check`）+ `migrate_schema.py`（已落到 192.140.178.79 的库里）+ `tools/verify_schema.py` 的 8 条新断言（uk_username / uk_token_hash / 两个审计索引 / 无 `is_admin` 列…） |
+| 会话体系（`adm_` 前缀、库里只存 `token_hash`） | 已实现 | `OpaqueTokenTest`（7 用例）+ `AdminServiceTest`（27 用例：过期、已登出、拿 JWT 贴后台）| 
+| 防爆破（失败计数落库 + 锁定 + `noRollbackFor`） | 已实现 | `AdminServiceTest` + `AdminHttpIT#failedLoginIsAudited`（数的是库里的行，不是返回值——`@Transactional` 默认回滚时这条才会红） |
+| 权限分级（SUPER / OPS） | 已实现 | `AdminApiContractTest#accountManagementIsSuperOnly` + `AdminHttpIT#opsCannotManageAccounts` |
+| 封禁（写 `actor.status`，用户端鉴权读的同一列） | 已实现 | `AdminApiContractTest`（参数校验与审计）+ `AdminHttpIT#suspendActorIsVisibleAndQueryable`（直接读库验证那一列） |
+| 删帖（复用作者删帖的级联路径 `PostDeletionPort`） | 已实现 | `AdminApiContractTest#deletePostPassesReasonAndDelegates` + `AdminHttpIT#deletePostCascadesAndIsAudited`（收件箱/点赞/评论一起清） |
+| 审计查询（四个过滤条件） | 已实现 | `AdminHttpIT#auditLogsAreQueryable`（按动作/目标/管理员）+ `AdminApiContractTest#auditFiltersReachRepository`；无删除接口 |
+| 后台账号管理（建号 / 停用 / 列表 / 详情） | 已实现 | `AdminHttpIT#disablingAdminKillsSessions`（停用连带删会话，「停用=立刻没权限」）+ `AdminApiContractTest`（口令长度、重名 40909、不能停自己 40904） |
+| 首个账号（`tm.admin.bootstrap.*`，表为空时生效一次） | 已实现 | `AdminServiceTest`（含「表非空时空操作」）+ `AdminHttpIT#bootstrapIsNoOpWhenTableIsNotEmpty` |
+| 独立 JAR / 不依赖用户端身份体系 | 已实现 | `AdminHttpIT#applicationStarts`（不配 `TM_JWT_SECRET` 也能起——`jwtTokenService` 在 `CoreConfiguration` 里是 `@Lazy`） |
+| HTTP 层契约（信封、错误码、分页字段、时间格式） | 已实现 | `AdminApiContractTest`（18 用例，standalone MockMvc + 真实 `AdminService`） |
+| `40909 admin username exists` | 已实现 | `verify_error_codes.py`（54/54）+ `docs/integration/07-errors-limits.md` §2.3 |
+| 后台 Vue SPA（`web/admin`） | **未实现** | 与本轮用户端 Vue 脚手架同一笔欠账（§14.1 末行）：接口已就绪，界面在 M10 打包那一步一起做 |
+| 审计归档 / 清理策略 | **未实现（有意）** | 审计表只写不删。清理属于 DBA 的归档动作，不应是一个 HTTP 接口（能被改动的审计只能证明「当时大概是这么回事」） |
+
+M9 同样是「先写错的版本会被测试打回」的一轮，两个缺陷都不是编译错误：
+
+| 缺陷 | 症状 | 根因 |
+|---|---|---|
+| 登录失败不计数、锁定永不触发 | 错误码一个不少，用例全绿 | `@Transactional` 默认对运行时异常回滚，把「失败计数 + 失败审计」一起回滚掉了——`noRollbackFor = TmException.class` 不是可选参数 |
+| OPS 读不到「我是谁」（403 而不是 200） | 前端无法隐藏它没有权限的入口，而报错看起来像权限配置错了 | `/v1/admin/me` 最初复用了 SUPER only 的 `getAdmin`；它必须走不做分级的那条路径（`currentAdmin`） |
 
 ---
 

@@ -340,6 +340,83 @@ CREATE TABLE IF NOT EXISTS `media` (
 """
 
 
+def admin_tables() -> str:
+    return """\
+-- ============================================================================
+-- 6. 管理后台：账号 / 会话 / 审计
+-- ============================================================================
+-- 后台身份**不进 actor 表**。理由不是「省一张表」，而是语义：
+--   管理员没有 handle、没有好友、不发消息、不出现在任何会话里，
+--   它不是「一种参与者」。若给 actor 加一个 is_admin 列，actor 表就要同时承载
+--   两套互不相干的语义，而权限判断会退化成「看某一列的值」——
+--   那正是「对等」模型最怕的那种特例（DESIGN §2.2）。
+--
+-- 口令用与人类账号同一个 PBKDF2（{@code PasswordHashes}，格式自带迭代数），
+-- 但存在这里而不是 actor_secret：actor_secret 里每一行都对应一个
+-- 「能收发消息的参与者」，两边的生命周期与吊销方式完全不同。
+
+CREATE TABLE IF NOT EXISTS `admin_user` (
+  `id`              BIGINT       NOT NULL                COMMENT 'Snowflake',
+  `username`        VARCHAR(64)  NOT NULL,
+  `display_name`    VARCHAR(128) NOT NULL,
+  `password_hash`   VARCHAR(255) NOT NULL                COMMENT 'pbkdf2-sha256$迭代数$盐$摘要',
+  `role`            TINYINT      NOT NULL DEFAULT 2      COMMENT '1=SUPER 2=OPS',
+  `status`          TINYINT      NOT NULL DEFAULT 1      COMMENT '1=ACTIVE 2=DISABLED',
+  `failed_attempts` INT          NOT NULL DEFAULT 0      COMMENT '连续登录失败次数，成功即清零',
+  `locked_until`    DATETIME(3)  NULL                    COMMENT '锁定到什么时候（防在线爆破）',
+  `created_at`      DATETIME(3)  NOT NULL,
+  `last_login_at`   DATETIME(3)  NULL,
+  PRIMARY KEY (`id`),
+  UNIQUE KEY `uk_username` (`username`)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COMMENT='后台账号（独立于 actor 的身份体系）';
+
+-- 会话在库里，而不是给管理员签发 JWT。这是一个**刻意的取舍**：
+--   · JWT 的吊销需要一张黑名单表，而黑名单表就是本表减去「签发」那一步；
+--   · 后台账号只有几个人、QPS 以「天」计，一次按哈希的点查完全不是成本；
+--   · 停用一个管理员、或他自己点了登出，**必须立刻生效**——
+--     而 JWT 的有效期是一段「你只能等它过期」的窗口。
+-- 落库的只有 SHA-256，明文（adm_…）只在登录响应里回一次，与 api_key 同一约定。
+
+CREATE TABLE IF NOT EXISTS `admin_session` (
+  `id`           BIGINT       NOT NULL,
+  `admin_id`     BIGINT       NOT NULL,
+  `token_hash`   CHAR(64)     NOT NULL                COMMENT 'SHA-256(adm_…)，明文只回一次',
+  `expires_at`   DATETIME(3)  NOT NULL,
+  `created_at`   DATETIME(3)  NOT NULL,
+  `last_seen_at` DATETIME(3)  NULL,
+  `ip`           VARCHAR(64)  NULL,
+  `user_agent`   VARCHAR(255) NULL,
+  PRIMARY KEY (`id`),
+  UNIQUE KEY `uk_token_hash` (`token_hash`),
+  KEY `idx_admin` (`admin_id`)                        COMMENT '停用管理员时踢掉全部会话',
+  KEY `idx_expires` (`expires_at`)                    COMMENT '清理过期会话'
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COMMENT='后台会话（可即时吊销）';
+
+-- 审计表刻意**冗余一份管理员用户名**（admin_name）：
+-- 审计的价值在于「事后可读」，而只存 admin_id 时，账号被删或改名之后
+-- 这行记录就只剩一个看不懂的数字——那正是最需要它的时候。
+--
+-- detail 用 JSON 而不是若干列：后台动作会持续增加，
+-- 「再加一列」意味着又一次 DDL 变更，而 JSON 让加字段变成零成本。
+
+CREATE TABLE IF NOT EXISTS `admin_audit_log` (
+  `id`          BIGINT        NOT NULL,
+  `admin_id`    BIGINT        NOT NULL,
+  `admin_name`  VARCHAR(64)   NOT NULL               COMMENT '冗余快照：账号改名/删除后仍可读',
+  `action`      VARCHAR(48)   NOT NULL               COMMENT 'ACTOR_SUSPEND / POST_DELETE / ADMIN_LOGIN …',
+  `target_type` VARCHAR(32)   NULL                   COMMENT 'ACTOR / POST / AGENT / ADMIN',
+  `target_id`   BIGINT        NULL,
+  `detail`      JSON          NULL                   COMMENT '结构化详情，便于以后加字段',
+  `ip`          VARCHAR(64)   NULL,
+  `created_at`  DATETIME(3)   NOT NULL,
+  PRIMARY KEY (`id`),
+  KEY `idx_admin_time` (`admin_id`, `created_at`),
+  KEY `idx_target_time` (`target_type`, `target_id`, `created_at`),
+  KEY `idx_time` (`created_at`)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COMMENT='后台操作审计（谁在什么时候改了什么）';
+"""
+
+
 def _normalize_charset(text: str, expected: int) -> str:
     """给所有表统一补上表级 COLLATE。
 
@@ -377,8 +454,9 @@ def build(shards: int, prefix: str, collation: str = COLLATION) -> str:
             conversation_tables(),
             message_tables(shards),
             social_tables(),
+            admin_tables(),
             "-- ============================================================================\n"
-            f"-- 共 {shards} 张 message 分片表 + 11 张非分片表\n"
+            f"-- 共 {shards} 张 message 分片表 + 14 张非分片表\n"
             "-- ============================================================================\n",
         ]
         text = "\n".join(parts)

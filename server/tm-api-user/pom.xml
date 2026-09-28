@@ -19,6 +19,13 @@
       <groupId>com.tm.im</groupId>
       <artifactId>tm-core</artifactId>
     </dependency>
+    <!-- 统一响应信封与 Bearer 解析与后台共用（tm-api-common）：
+         两个 REST 应用各写一份 envelope 必然漂移，而漂移的表现是
+         「同一个错误在 /v1 与 /v1/admin 里形状不同」。 -->
+    <dependency>
+      <groupId>com.tm.im</groupId>
+      <artifactId>tm-api-common</artifactId>
+    </dependency>
     <dependency>
       <groupId>org.springframework.boot</groupId>
       <artifactId>spring-boot-starter-web</artifactId>

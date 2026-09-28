@@ -131,6 +131,17 @@ public class InMemoryPosts implements PostRepository {
                 .toList());
     }
 
+    @Override
+    public List<Post> pageForModeration(Long beforeId, int limit) {
+        // 与真实现同一套排序（id 倒序）：Snowflake 主键与时间同序，所以这里
+        // 与「按时间倒序」等价，而测试不必去抢时间戳。
+        return new ArrayList<>(rows.values().stream()
+                .filter(row -> beforeId == null || row.getId() < beforeId)
+                .sorted((x, y) -> Long.compare(y.getId(), x.getId()))
+                .limit(Math.max(1, limit))
+                .toList());
+    }
+
     // ------------------------------------------------------------------ 测试用
 
     /** 直接塞一行（构造「别人已经发过动态」这类前置状态）。 */

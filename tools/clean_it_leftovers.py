@@ -9,6 +9,9 @@
   * MySQL 账号：只删 handle 形如 `it_...` 的 actor 及其凭据，以及
     **其 actor 行已不存在的孤儿 actor_secret**（它们永远登不上，且正是
     “清理代码只执行了一半”的产物）；
+  * MySQL 后台：只删 `admin_user` 里用户名形如 `it_...` 的后台账号，
+    连同它们的会话行与审计行（后台这套表有唯一索引，残留会让下一次
+    集成测试建号直接撞 `uk_username`）；
   * MySQL 会话：只删「成员行指向已不存在的 actor」与「一个成员都没有」的会话，
     以及**这些会话的消息**（按 conv_id 在 16 张物理分表上删）——
     判据是「孤儿」而不是「id 长得像测试数据」（雪花号没有可判读的前缀）；
@@ -307,6 +310,82 @@ def clean_plaza(cur, apply: bool, doomed_actors: list[int]) -> int:
     return total
 
 
+def clean_admin(cur, apply: bool, doomed_actors: list[int]) -> int:
+    """清掉集成测试遗留的后台数据（admin_user / admin_session / admin_audit_log）。
+
+    判据比其余部分宽松，因为这些表**自带可判读的前缀**：
+
+      * `admin_user.username` 必须匹配 `^[a-z0-9_]{3,32}$`（DDL 上的 `uk_username`），
+        而测试建号时用的就是 `it_admin_...` / `it_ops_...` / `it_victim_...` /
+        `it_fail_...`（AdminHttpIT 里的四个夹具账号）——那是这一族里唯一
+        能可靠识别的证据；
+      * 会话与会话审计挂在 `admin_id` 上，按上面那批 id 删；
+      * 审计另有一条按 `target_id`：后台封号写的是 `actor.status`、删帖写的是
+        `POST`，所以「只剩审计行、指向一个已经不存在的测试账号/动态」是正常残留。
+        （删帖那一条必须在广场那一步**之前**取，否则 post 行已经被删了，
+        审计就再也认不出它属于测试数据。）
+
+    顺序不能反：会话与审计都引用 admin_user.id，先删账号的话
+    第二轮 dry-run 就再也找不到那批会话了（admin_session 里没有用户名）。
+
+    为什么要清：`admin_user` 有唯一索引，AdminHttpIT 自己会按前缀先删一遍——
+    但那只覆盖它那一类的前缀，且进程被强杀时不会执行。残留的后果是
+    「下一次跑集成测试时建号直接撞 uk_username」，看起来像权限或数据问题。
+    """
+    cur.execute(r"SELECT id, username FROM admin_user WHERE username LIKE %s",
+                (PREFIX + "\\_%",))
+    test_admins = cur.fetchall()
+    admin_ids = sorted({row[0] for row in test_admins})
+
+    # 审计行的判据是「操作者」或「目标」是测试数据，两者都可能单独残留：
+    # 账号行被上一轮删掉之后，它留下的会话与审计行还是应该被清。
+    audit_clauses: list[str] = []
+    audit_params: list[int] = []
+    session_clause = "1 = 0"
+    account_clause = "1 = 0"
+    if admin_ids:
+        ph = ",".join(["%s"] * len(admin_ids))
+        session_clause = f"admin_id IN ({ph})"
+        account_clause = f"id IN ({ph})"
+        audit_clauses.append(f"admin_id IN ({ph})")
+        audit_params += admin_ids
+    if doomed_actors:
+        ph = ",".join(["%s"] * len(doomed_actors))
+        audit_clauses.append(f"(target_type = 'ACTOR' AND target_id IN ({ph}))")
+        audit_params += doomed_actors
+        # 删帖那一条要在这里取：广场那一步（在调用方里排在后面）
+        # 一旦删掉 post 行，审计里的 target_id 就再也认不出属于测试数据了。
+        audit_clauses.append(f"(target_type = 'POST' AND target_id IN"
+                             f" (SELECT id FROM post WHERE author_id IN ({ph})))")
+        audit_params += doomed_actors
+
+    if not audit_clauses:
+        print("后台: 无遗留（既没有测试后台账号，也没有测试参与者可作审计目标）")
+        return 0
+
+    print(f"后台: admin_user {len(test_admins)} 行（用户名形如 {PREFIX}_...）")
+    for row in test_admins:
+        print(f"  admin_user id={row[0]} username={row[1]}")
+
+    account_params = tuple(admin_ids)
+    steps = [
+        ("admin_session", session_clause, account_params),
+        ("admin_audit_log", " OR ".join(audit_clauses), tuple(audit_params)),
+        ("admin_user", account_clause, account_params),
+    ]
+    total = 0
+    for table, where, params in steps:
+        cur.execute(f"SELECT COUNT(*) FROM `{table}` WHERE {where}", params)
+        n = cur.fetchone()[0]
+        if apply:
+            cur.execute(f"DELETE FROM `{table}` WHERE {where}", params)
+            print(f"  {table}: 清除 {n} 行")
+        else:
+            print(f"  {table}: 发现 {n} 行（未删除）")
+        total += n
+    return total
+
+
 def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--apply", action="store_true", help="真正执行删除；默认只统计")
@@ -355,6 +434,9 @@ def main() -> int:
             # 会话清理排在账号之后：它的判据（成员行指向已/将不存在的 actor）
             # 正是「账号刚被删掉」的产物。
             total += clean_conversations(cur, tables, args.apply, doomed_actors)
+            # 后台排在广场之前：它的审计判据包含「target 是某个测试作者的动态」，
+            # 而那批 post 行正是下一步要删的东西。
+            total += clean_admin(cur, args.apply, doomed_actors)
             # 广场排在最后：它的判据也是「作者已经不存在」。
             total += clean_plaza(cur, args.apply, doomed_actors)
     finally:

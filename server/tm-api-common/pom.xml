@@ -1,0 +1,35 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<project xmlns="http://maven.apache.org/POM/4.0.0"
+         xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+         xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 https://maven.apache.org/xsd/maven-4.0.0.xsd">
+  <modelVersion>4.0.0</modelVersion>
+
+  <parent>
+    <groupId>com.tm.im</groupId>
+    <artifactId>tm-im-parent</artifactId>
+    <version>1.0.0-SNAPSHOT</version>
+  </parent>
+
+  <artifactId>tm-api-common</artifactId>
+  <name>tm-api-common</name>
+  <description>两个 REST 应用共用的 HTTP 层：统一响应信封与 Bearer 凭证解析</description>
+
+  <dependencies>
+    <dependency>
+      <groupId>com.tm.im</groupId>
+      <artifactId>tm-common</artifactId>
+    </dependency>
+    <!-- 只引 web，不引 core：这一层只认识 ApiResponse / ErrorCode / TmException，
+         不认识任何领域服务。反过来（让 tm-api-user 依赖 tm-api-admin）会让
+         「用户端进程里存在管理接口」成为可能，而那正是 M9 要避免的事。 -->
+    <dependency>
+      <groupId>org.springframework.boot</groupId>
+      <artifactId>spring-boot-starter-web</artifactId>
+    </dependency>
+    <dependency>
+      <groupId>org.springframework.boot</groupId>
+      <artifactId>spring-boot-starter-test</artifactId>
+      <scope>test</scope>
+    </dependency>
+  </dependencies>
+</project>

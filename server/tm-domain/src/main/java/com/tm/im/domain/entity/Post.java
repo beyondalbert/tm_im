@@ -1,4 +1,4 @@
-// 源: deploy/sql/01-schema.sql  sha256[:16]=7818dd686897f64d
+// 源: deploy/sql/01-schema.sql  sha256[:16]=39b5c8e0aae10e1c
 package com.tm.im.domain.entity;
 
 import com.baomidou.mybatisplus.annotation.IdType;

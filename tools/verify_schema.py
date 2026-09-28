@@ -146,9 +146,9 @@ def main() -> int:
 
     expect_biz = {"actor", "actor_secret", "agent_profile", "conversation",
                   "conversation_member", "friendship", "post", "post_like", "post_comment",
-                  "feed_item", "media"}
+                  "feed_item", "media", "admin_user", "admin_session", "admin_audit_log"}
     if set(biz_tables) == expect_biz:
-        ok(f"业务表 11 张齐全: {', '.join(biz_tables)}")
+        ok(f"业务表 14 张齐全: {', '.join(biz_tables)}")
     else:
         missing = expect_biz - set(biz_tables)
         extra = set(biz_tables) - expect_biz
@@ -368,6 +368,37 @@ def main() -> int:
         ok("post_comment 有 (post_id, created_at) 索引 —— 按动态拉评论走索引")
     else:
         bad("post_comment 缺 idx_post_time")
+
+    # ---- 管理后台：身份隔离、可吊销会话、可读审计（M9） ----
+    au = tables.get("admin_user", "")
+    if "UNIQUE KEY `uk_username` (`username`)" in au:
+        ok("admin_user 有 uk_username —— 后台账号不会重名")
+    else:
+        bad("admin_user 缺 uk_username")
+    if "is_admin" not in tables.get("actor", ""):
+        ok("actor 里没有 is_admin 列 —— 后台身份不进参与者表（对等模型没有特例）")
+    else:
+        bad("actor 里出现了 is_admin：后台身份混进了参与者表")
+
+    asess = tables.get("admin_session", "")
+    if "UNIQUE KEY `uk_token_hash` (`token_hash`)" in asess:
+        ok("admin_session 存 token 哈希（明文不落库），且有唯一键供 O(1) 查找")
+    else:
+        bad("admin_session 缺 uk_token_hash —— 要么存了明文，要么每次鉴权都全表扫")
+    if "KEY `idx_admin` (`admin_id`)" in asess:
+        ok("admin_session 有 idx_admin —— 停用管理员时能直接踢掉其全部会话")
+    else:
+        bad("admin_session 缺 idx_admin（停用账号后旧会话仍然可用）")
+
+    aal = tables.get("admin_audit_log", "")
+    if "KEY `idx_admin_time` (`admin_id`, `created_at`)" in aal:
+        ok("admin_audit_log 有 (admin_id, created_at) 索引 —— 「某个管理员干过什么」走索引")
+    else:
+        bad("admin_audit_log 缺 idx_admin_time")
+    if "KEY `idx_target_time` (`target_type`, `target_id`, `created_at`)" in aal:
+        ok("admin_audit_log 有 (target_type, target_id, created_at) 索引 —— 「这个对象被谁动过」走索引")
+    else:
+        bad("admin_audit_log 缺 idx_target_time")
 
     # 时间精度
     bad_dt = [t for t, s in tables.items()

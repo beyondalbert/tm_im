@@ -50,7 +50,8 @@ rules:
 
   # ---------------- 单表规则（非分片表） ----------------
   # actor / actor_secret / agent_profile / conversation / conversation_member
-  # friendship / post / post_like / post_comment / feed_item / media 均为非分片表。
+  # friendship / post / post_like / post_comment / feed_item / media
+  # admin_user / admin_session / admin_audit_log 均为非分片表。
   #
   # `"*.*"` 不是可有可无的：它声明「未出现在分片规则里的表全部自动扫码登记」。
   # 省掉它（只写 defaultDataSource）的后果不是「没人管、照常能用」，而是

@@ -1,4 +1,4 @@
-package com.tm.im.api.user.auth;
+package com.tm.im.api.common.auth;
 
 import com.tm.im.common.error.ErrorCode;
 import com.tm.im.common.error.TmException;

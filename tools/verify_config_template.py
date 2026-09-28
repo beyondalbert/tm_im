@@ -23,6 +23,11 @@
 3. 两边的默认值必须一致；代码里「没有默认值」的项（如 jwt-secret）
    在模板里必须写成 `${ENV}` 且不给默认值
 
+   唯一的例外是「代码默认值就是空串的 String」：模板写 `${ENV:}` 绑出来
+   也是空串，两边一致，不算不一致（这类项单独计数打印，见下）。
+   它不是「凑合」，而是唯一正确的写法 —— 它同时是「部署方可以用环境变量
+   覆盖」和「不配就是空」两件事，模板里写死一个非空默认值反而错。
+
 `tm.storage` / `tm.message` / `tm.agent` / `tm.friend` / `tm.feed` 这些
 还没有对应配置类的段落属于「模板先行」，只做提示不算失败；但一旦某个前缀
 有了配置类，它下面就按严格模式比对。
@@ -260,9 +265,12 @@ def normalize_template_value(key: str, raw):
 
     ``${ENV:}`` 这种「空默认值」不算提供了默认值：对非 String 类型，
     空串会被 Spring 绑定成 null（已有单测钉住这个行为），
-    正好对应代码里的「本项未配置」分支。
-    但对 String 类型，``${ENV:}`` 就是空字符串 —— 它依然是一次「赋值」，
-    把「未配置」与「配成空串」混为一谈，所以那种情况仍算提供了默认值。
+    正好对应代码里的「本项未配置」分支；对 String 类型它就是空字符串。
+
+    注意这个函数不知道字段类型，所以只能统一返回 ``has_default=False``。
+    「String 字段 + ``${ENV:}``」到底算不算一致，交给调用方结合
+    代码默认值判断：若代码默认值本来就是空串，两边相同，见 main() 里的
+    ``empty_default`` 分支。
     """
     if isinstance(raw, str):
         m = PLACEHOLDER.match(raw.strip())
@@ -288,8 +296,10 @@ def normalize_scalar(key: str, value):
             return text == "true"
         if re.fullmatch(r"-?\d+", text):
             return int(text)
-        # ttl / 超时这类键按时长比较；其余按字符串
-        if any(word in key for word in ("ttl", "timeout", "millis", "ttl-seconds")):
+        # ttl / 超时 / 时长类键按时长比较；其余按字符串。
+        # 「duration」是这一版补上的：去掉它时，`lockout-duration: 15m` 会以字符串与
+        # 代码里的 `Duration.ofMinutes(15)`（纳秒数）相比，得出一个假的不一致。
+        if any(word in key for word in ("ttl", "timeout", "millis", "duration")):
             nanos = human_duration_to_nanos(text)
             if nanos is not None:
                 return nanos
@@ -323,6 +333,9 @@ def main() -> int:
     problems: list[str] = []
     checked = 0
     forward_looking: list[str] = []
+    # 「代码默认值是空串、模板写 ${ENV:}」的项：两边一致，但要单独列出来给
+    # 人看一眼——因为它的含义是「不配 = 空」，在模板里必须写清空串的行为。
+    empty_default: list[str] = []
 
     # ---- 方向一：代码 → 模板（含默认值一致性） ----
     for prefix, fields in sorted(java_props.items()):
@@ -357,9 +370,20 @@ def main() -> int:
                 continue
 
             if not has_default:
+                # 代码默认值是空串的 String：模板 ${ENV:} 绑出来也是空串，
+                # 两边一致。这一项不是「漏了默认值」——它恰恰是唯一正确的写法：
+                # 既让部署方能覆盖，又不把任何值写进仓库。
+                # （曾经这里直接报「缺省部署会直接启动失败」，把
+                #  tm.admin.bootstrap.* 三个空串默认的项误判成了缺陷：
+                #  代码里 username/password 为空只是「不建首个后台账号」，
+                #  服务照常启动，见 AdminService#bootstrap。）
+                if field["type"] == "String" and field["default"] == "":
+                    empty_default.append(full)
+                    continue
                 problems.append(f"`{full}` 的占位符 ${{{env}}} 没有默认值，"
                                 f"而代码默认值是 {field['default']!r} —— "
-                                f"缺省部署会直接启动失败")
+                                f"缺省部署会直接启动失败（模板要给同一声明值，"
+                                f"形如 ${{{env}:值}}，或把代码默认值改掉）")
                 continue
 
             if value != field["default"]:
@@ -395,6 +419,11 @@ def main() -> int:
     print(f"  模板: {template_path}")
     print(f"  配置类: " + ", ".join(f"{p}({len(f)})" for p, f in sorted(java_props.items())))
     print(f"  已比对 {checked} 项")
+    if empty_default:
+        print(f"  空串默认（代码 ''，模板 ${{ENV:}}）: {len(empty_default)} 项")
+        if args.verbose:
+            for key in empty_default:
+                print(f"    - {key}")
     if forward_looking:
         print(f"  模板先行（暂无配置类，只提示）: {len(forward_looking)} 项")
         if args.verbose:

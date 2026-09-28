@@ -1,4 +1,4 @@
-package com.tm.im.api.user.auth;
+package com.tm.im.api.common.auth;
 
 import com.tm.im.common.error.ErrorCode;
 import com.tm.im.common.error.TmException;
@@ -59,5 +59,25 @@ public final class BearerCredential {
             throw new TmException(ErrorCode.INVALID_TOKEN_FORMAT, "Bearer 之后为空");
         }
         return credential;
+    }
+
+    /**
+     * 宽容版：拿不到凭证时返回 {@code null} 而不是抛异常。
+     *
+     * <p><b>只用于「登出」这类幂等动作</b>：那些接口的成功与否不取决于凭证是否有效
+     * （无效凭证 = 已经登出了），而用 {@link #require} 会把它变成一个 401——
+     * 客户端于是陷入「登出失败 → 不敢清本地状态 → 拿着过期凭证继续请求」的循环。
+     *
+     * <p>鉴权路径上<b>必须</b>用 {@link #require}：那里的 null 会被下游当成
+     * 「匿名」而不是「参数没给」，两者相差一整条鉴权分支。
+     */
+    public static String optional(String headerValue) {
+        if (headerValue == null || headerValue.isBlank()
+                || headerValue.length() < PREFIX.length()
+                || !headerValue.regionMatches(true, 0, PREFIX, 0, PREFIX.length())) {
+            return null;
+        }
+        String credential = headerValue.substring(PREFIX.length());
+        return credential.isEmpty() ? null : credential;
     }
 }

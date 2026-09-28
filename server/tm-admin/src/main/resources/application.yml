@@ -1,0 +1,91 @@
+# ============================================================
+# tm-admin 的开发默认值（管理后台，DESIGN §5.1）
+# ------------------------------------------------------------
+# 独立 JAR、独立端口、**没有 Netty 长连接**：后台不参与任何会话，
+# 它只读库与写库。这不是「少配置一点」，而是安全边界：
+# 长连接那套协议解析（protobuf 解帧、粘包处理）不会出现在这个进程里。
+#
+# 生产启动方式（不改这个文件）：
+#   java -jar tm-admin.jar \
+#     --spring.config.additional-location=file:/etc/tm/ \
+#     --sharding.url=jdbc:shardingsphere:absolutepath:/etc/tm/sharding.yaml
+#
+# ★ 敏感值一律 ${ENV}，本文件不含任何可用凭据。
+# ============================================================
+spring:
+  application:
+    name: tm-admin
+
+  # ---------- 数据源：与 tm-app 同一套（ShardingSphere → 外部 MySQL） ----------
+  datasource:
+    driver-class-name: org.apache.shardingsphere.driver.ShardingSphereDriver
+    url: jdbc:shardingsphere:absolutepath:${TM_SHARDING_CONF:deploy/conf/sharding.yaml}
+
+  # ---------- Redis ----------
+  # 后台的接口一条都不调用 Redis，但扫描清单里确实有一个仓储用它
+  # （RedisRefreshTokenStore 在 com.tm.im.storage 下）——它只在被调用时才连，
+  # 所以这里配不配都不影响后台启动。留着这几行是为了让「两个应用共用同一份
+  # 部署配置」这件事成立：同一套环境变量能拉起 tm-app 与 tm-admin。
+  data:
+    redis:
+      host: ${TM_REDIS_HOST:127.0.0.1}
+      port: ${TM_REDIS_PORT:6379}
+      password: ${TM_REDIS_PASSWORD:}
+      database: ${TM_REDIS_DB:0}
+      timeout: 3000ms
+      connect-timeout: 3000ms
+
+  # ---------- JSON 字段命名 ----------
+  # 与 tm-app 逐字一致（snake_case + 可空字段仍输出 null）。
+  # 后台前端与用户端前端共用一套类型定义，两边如果不同名，
+  # 表现是「某个字段永远是 undefined」而不报错。
+  jackson:
+    property-naming-strategy: SNAKE_CASE
+    default-property-inclusion: always
+
+  mvc:
+    throw-exception-if-no-handler-found: true
+
+server:
+  # 与 tm-app 分开：后台不该占用（也不该暴露在）用户端的端口上。
+  port: ${TM_ADMIN_HTTP_PORT:8081}
+
+mybatis-plus:
+  configuration:
+    map-underscore-to-camel-case: true
+    default-enum-type-handler: com.baomidou.mybatisplus.core.handlers.MybatisEnumTypeHandler
+  global-config:
+    banner: false
+
+tm:
+  # 注意：这里**没有** tm.identity.jwt-secret，而且应该是这样 ——
+  # 后台不扫 com.tm.im.core.identity，因此那个需要密钥的 Bean 根本不会被创建。
+  # 若哪天它报「jwt secret 未配置」，说明有人把 identity 的包加进了扫描清单，
+  # 而那是一个需要重新审视的决定（那把钥匙能伪造任意用户的 token）。
+
+  admin:
+    session-ttl: ${TM_ADMIN_SESSION_TTL:8h}
+    max-login-failures: ${TM_ADMIN_MAX_LOGIN_FAILURES:5}
+    lockout-duration: ${TM_ADMIN_LOCKOUT:15m}
+    min-password-length: ${TM_ADMIN_MIN_PASSWORD_LENGTH:12}
+    # 首个账号：只在 admin_user 表为空时使用一次，之后配置失效（见 AdminService#bootstrap）。
+    bootstrap:
+      username: ${TM_ADMIN_BOOTSTRAP_USERNAME:}
+      password: ${TM_ADMIN_BOOTSTRAP_PASSWORD:}
+      display-name: ${TM_ADMIN_BOOTSTRAP_DISPLAY_NAME:}
+
+  # ---------- 时区口径 ----------
+  # 必须与 sharding.yaml 里 jdbcUrl 的 serverTimezone 一致，否则时间整体偏移几小时。
+  time:
+    zone: ${TM_TIME_ZONE:Asia/Shanghai}
+
+  # ---------- 节点标识 ----------
+  # 后台也需要：admin_user / admin_audit_log 的主键同样是 Snowflake（IdGenerator 是
+  # tm-core 的 Bean）。两套应用共用同一个节点号会撞主键，所以后台必须有自己的节点号。
+  node:
+    id: ${TM_ADMIN_NODE_ID:auto}
+
+logging:
+  level:
+    root: INFO
+    com.tm.im: ${TM_LOG_LEVEL:INFO}

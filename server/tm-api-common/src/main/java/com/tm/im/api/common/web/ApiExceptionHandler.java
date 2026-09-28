@@ -1,4 +1,4 @@
-package com.tm.im.api.user.web;
+package com.tm.im.api.common.web;
 
 import com.tm.im.common.api.ApiResponse;
 import com.tm.im.common.error.ErrorCode;

@@ -42,6 +42,7 @@
     <module>tm-storage</module>
     <module>tm-core</module>
     <module>tm-channel</module>
+    <module>tm-api-common</module>
     <module>tm-api-user</module>
     <module>tm-api-admin</module>
     <module>tm-app</module>
@@ -96,6 +97,11 @@
       <dependency>
         <groupId>com.tm.im</groupId>
         <artifactId>tm-channel</artifactId>
+        <version>${project.version}</version>
+      </dependency>
+      <dependency>
+        <groupId>com.tm.im</groupId>
+        <artifactId>tm-api-common</artifactId>
         <version>${project.version}</version>
       </dependency>
       <dependency>

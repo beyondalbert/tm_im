@@ -45,14 +45,16 @@
 
 ```
 docs/     设计文档 + 接入文档
-deploy/   配置模板（sharding.yaml / application-external.yml）
+deploy/   配置模板（sharding.yaml / application-external.yml）与建表脚本
 deploy/sql/  建表脚本（由 tools/gen_schema.py 生成，勿手改）
 proto/    长连接协议定义（transport.proto，可直接 protoc 编译）
 tools/    校验、生成与引导脚本
-server/   后端（规划中）
-web/      前端（规划中）
-sdk/      Agent SDK（规划中）
+server/   后端（Maven 聚合工程：10 个子模块，两个可执行 JAR）
 ```
+
+尚未开始的两个目录（写在 DESIGN §12 的规划里，而代码里还没有）：
+`web/h5` 用户端 Vue 3、`web/admin` 后台 Vue 3。两者的接口都已就绪，
+但它们不阻塞任何后端验收（DESIGN §14.1 与 §14.2 把它们列在明处，而不是默认“应该有”）。
 
 ## 自检
 
@@ -74,14 +76,18 @@ uv run --with protobuf --with pyyaml --with sqlglot python tools/verify_all.py
 | `config-tmpl` | 配置模板与 `@ConfigurationProperties` 一致（缺项 / 拼错 / 默认值不一致） |
 | `mutate` | **变异测试**：验证建表校验器真的能抓到错误 |
 | `mutate-deps` | **变异测试**：验证 ShardingSphere 依赖缺失与配置陷阱必被守卫捕获（8 类） |
-| `mutate-cfg` | **变异测试**：验证模板校验器能抓到 5 类缺陷 |
+| `mutate-cfg` | **变异测试**：验证模板校验器能抓到 7 类缺陷 |
 | `mutate-cmd` | **变异测试**：验证命令字契约校验器能抓到 10 类缺陷（方向写反、编号错、漏登记、漏写方向…） |
+| `mutate-member` | **变异测试**：群成员管理的 14 条规则（权限矩阵与状态机）都有测试钉住 |
+| `mutate-admin` | **变异测试**：后台的 6 条规则（越权、分页夹取、码值校验、停用删会话、失败计数）都有测试钉住 |
+| `mutate-sync` | **变异测试**：续传读取路径的 10 条规则都有测试钉住 |
 
-`--quick` 跳过耗时的 `docs` / `mutate` / `mutate-deps` / `mutate-cfg` / `mutate-cmd` / `mutate-member`。
+`--quick` 跳过耗时的 `docs` / `mutate` / `mutate-deps` / `mutate-cfg` / `mutate-cmd` / `mutate-member` / `mutate-admin`。
 
 另有 5 项需要外部 MySQL/Redis（`runtime-cfg` = 运行时配置是否与当前
 `local-conn.env` 一致，`schema-drift` = 库结构与 DDL 是否一致，`collation` = 实测服务端排序规则等价性，
-`mutate-cluster` = 集群路由的 13 条规则，`mutate-member-tx` = 转让群主的事务性），
+`mutate-cluster` = 集群路由/节点探活/跳节点推送的 17 条规则，
+`mutate-member-tx` = 转让群主的事务性），
 用 `--services` 打开：
 
 ```bash
@@ -262,6 +268,10 @@ mvn -o -pl tm-channel -am test
 uv run --with pymysql python tools/clean_it_leftovers.py          # 只统计
 uv run --with pymysql python tools/clean_it_leftovers.py --apply  # 真删
 ```
+
+后台的残留也在它的范围里（M9）：`admin_user` 的用户名有唯一索引，
+残留一条就会让下一次跑集成测试的建号直接撞 `uk_username` —— 而那个报错看起来像权限问题。
+它按同一套 `it_` 前缀删账号，并连带删掉那个账号的会话行与审计行。
 
 ### 消息序号（M3）：为什么先钉住它，而不是先写业务
 
@@ -601,6 +611,39 @@ WebP 是**半支持**，且这件事是明说的：当前 JDK 的 ImageIO 没有
 评论权限与回复校验）+ `PlazaHttpIT`（9 用例，真实 MySQL：DDL 真的存在、
 主键冲突真的回 40907、`like_count` 真的原子加减、异步扩散真的落到好友收件箱、
 翻页不重不漏、游标贴错回 40010）。
+
+### 管理后台（M9）：为什么它必须是另一个 JAR
+
+后台 API 的每一个接口都能「封任何人的号、删任何一条动态」。这类能力不能靠约定保护，
+只能靠**边界**：`tm-admin.jar` 是独立应用、独立端口，与 `tm-app.jar` 不共进程。
+理由很具体——用户端的每一处输入解析、每一个第三方依赖都在那个进程里，
+管理接口与它同进程，等于把这些面全部加成「封人权」的入口。
+
+由此往下是一串连带决定：
+
+| 决定 | 不这么做会怎样 |
+|---|---|
+| 后台会话是**库里的行**（`admin_session`，只存 `token_hash`，8 小时），不是 JWT | JWT 无状态、**删不掉**：停用一个后台账号后，他的旧凭证还能继续封号到过期为止 |
+| 凭证前缀 `adm_`（用户 JWT 无前缀、Agent 是 `sk_`） | 三种凭证形状相近；前缀是日志里唯一能一眼分辨的东西，也是 40102 与 40101 的分界线 |
+| `admin_user` 与 `actor` 是**两张互不相干的表** | 后台不参与会话/好友/消息；把管理员塞进 `actor` 后，「列全站用户」的接口会顺手把后台账号列出去，而审计里的 `admin_id` 也指向了「某个人」 |
+| 失败计数与锁定时间落在**库**里（`failed_attempts` / `locked_until`） | 放在单节点内存里 = 多实例部署时每个实例各给 5 次机会，而单实例开发时看不出来 |
+| 登录失败走 `@Transactional(noRollbackFor = TmException.class)` | 默认回滚会把「失败计数 + 失败审计」一起删掉：错误码一个不少、用例全绿，**而锁定永远不会触发** |
+| 权限判据写在 `AdminService` 里（`requireSuper`）而不是各控制器里 | 控制器里的判断会随接口数量增长而漏写一个；而「漏写的那一个」恰好就是越权入口 |
+| 每一个写动作与业务变更**同事务**写 `admin_audit_log` | 「先改库、再记日志」中间失败时，事后只能靠「谁可能知道口令」来推断 |
+| 首个账号由 `tm.admin.bootstrap.*` 在**表为空时**生效一次 | 否则得往仓库里放一份带口令的建号脚本；一次性口令即使泄漏也没有可用的时间窗口 |
+| 删帖复用作者删帖那条级联路径（`PostDeletionPort`，后台不依赖整个 `PlazaService`） | 后台自己再实现一遍删除，就会出现两套删除语义：一处清了收件箱，另一处没清 |
+
+**一个真实的缺陷**（不是设计问题，是编码问题）：失败计数与失败审计写在抛出 `40101` 之前，
+而 Spring 默认对运行时异常回滚——登录失败时那两处写入被一起回滚掉了。
+表现是「错误码完全正确、用例全绿、锁定永远不触发」。抓到它的不是断言返回值的用例，
+而是 `AdminHttpIT` 里**数库里的行**的那一条。
+
+验证：`AdminServiceTest`（27 用例：会话过期/已登出/拿 JWT 贴后台、锁定与计数、审计四角度、
+停用连带删会话、bootstrap 三条路径）+ `AdminApiContractTest`（18 用例，standalone MockMvc +
+真实 `AdminService`：信封、错误码、码值越界回 40002、分页夹取与游标、snake_case）+
+`AdminHttpIT`（12 用例，真实 HTTP + 真实 MySQL：独立起进程、封禁写的是用户端鉴权读的同一列、
+停用立刻踢会话、删帖级联、审计可查）+ `mutate_admin_api.py`（6 个变异，包括「删掉权限判断」
+与「停用时不删会话」，全部被捕获）。
 
 ### 断点续传读取（M3）：`CMD_SYNC` 怎么落地
 
