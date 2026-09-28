@@ -1,0 +1,43 @@
+/* 全局样式：只放 Element Plus 管不到的三件事（整体底色、登录页居中、代码块字体）。
+   组件内部的样式写在各自的 <style scoped> 里，避免「改了这里坏了那里」。 */
+
+:root {
+  --tm-bg: #f5f7fa;
+}
+
+html,
+body,
+#app {
+  height: 100%;
+  margin: 0;
+  padding: 0;
+}
+
+body {
+  background: var(--tm-bg);
+  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', 'Microsoft YaHei', sans-serif;
+}
+
+/* 审计 detail 与动态内容用等宽字体：它们是 JSON 与用户输入，
+   比例字体下缩进与引号会看不出层级。 */
+.tm-mono {
+  font-family: Consolas, 'Courier New', monospace;
+  font-size: 12px;
+  white-space: pre-wrap;
+  word-break: break-all;
+}
+
+.tm-page {
+  padding: 16px;
+}
+
+.tm-filters {
+  margin-bottom: 12px;
+}
+
+.tm-pager {
+  margin-top: 12px;
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}

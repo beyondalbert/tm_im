@@ -39,8 +39,13 @@ FRAMES_JAVA = "server/tm-channel/src/main/java/com/tm/im/channel/codec/Frames.ja
 REALTIME_MD = "docs/integration/04-realtime.md"
 
 # 校验器需要的输入（照仓库结构摆好，它就能在临时目录里当仓库根用）。
-# deploy/ 是 README 里链接到的目录；runtime/ 子目录含真实凭据，拷过来没有意义。
-COPY = ["tools", "proto", "docs", "server", ".tools", "deploy", "README.md"]
+# deploy/ 与 web/ 是 README 里链接到的目录；runtime/ 子目录含真实凭据，
+# node_modules/ 与 dist/ 是构建产物（体积大、与校验无关），都不拷。
+#
+# ★ 这个清单与 README 里的链接是一对**必须同时维护**的东西：新增一个指向
+# 新目录的链接时，忘了更新这里，mutate-cmd 会在临时工作区里报「链接不存在」——
+# 那个报错看上去像文档坏了，实际是这个拷贝清单少了东西。
+COPY = ["tools", "proto", "docs", "server", ".tools", "deploy", "web", "README.md"]
 
 SYNC_RESP_PROTO_LINE = ("    CMD_SYNC_RESP = 16;  // S→C  payload = SyncResponse"
                         "  续传响应（一次 CMD_SYNC 恰好对应一帧）")
@@ -177,7 +182,7 @@ def sha(path: Path) -> str:
 def make_workspace() -> Path:
     """拷一份精简仓库到临时目录并返回其根。排除 target/（构建产物，体积大）。"""
     tmp = Path(tempfile.mkdtemp(prefix="tm-mutate-cmd-"))
-    ignore = shutil.ignore_patterns("target", "__pycache__", "runtime")
+    ignore = shutil.ignore_patterns("target", "__pycache__", "runtime", "node_modules", "dist")
     for rel in COPY:
         src = REPO / rel
         if src.is_dir():

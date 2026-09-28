@@ -22,6 +22,7 @@
 | [Webhook](docs/integration/05-webhook.md) | 事件、验签、重试与幂等 |
 | [零依赖裸实现](docs/integration/06-no-sdk-guide.md) | **手写 protobuf**，不用任何库 |
 | [错误码与限流](docs/integration/07-errors-limits.md) | 排错速查 |
+| [管理后台 API](docs/integration/08-admin-api.md) | `/v1/admin` 的完整契约（另一个 JAR） |
 
 ## 功能范围
 
@@ -50,11 +51,12 @@ deploy/sql/  建表脚本（由 tools/gen_schema.py 生成，勿手改）
 proto/    长连接协议定义（transport.proto，可直接 protoc 编译）
 tools/    校验、生成与引导脚本
 server/   后端（Maven 聚合工程：10 个子模块，两个可执行 JAR）
+web/admin/ 管理后台 Vue 3（M9；M10 打包时并入 tm-admin.jar）
 ```
 
-尚未开始的两个目录（写在 DESIGN §12 的规划里，而代码里还没有）：
-`web/h5` 用户端 Vue 3、`web/admin` 后台 Vue 3。两者的接口都已就绪，
-但它们不阻塞任何后端验收（DESIGN §14.1 与 §14.2 把它们列在明处，而不是默认“应该有”）。
+还有一个写在 DESIGN §12 的规划里、而代码里没有的目录：`web/h5` 用户端 Vue 3
+（M3 验收标准的最后一步）。它的接口已就绪，但不阻塞任何后端验收
+（DESIGN §14.1 把它列在明处，而不是默认“应该有”）。
 
 ## 自检
 
@@ -73,6 +75,7 @@ uv run --with protobuf --with pyyaml --with sqlglot python tools/verify_all.py
 | `errors` | 错误码契约：文档 §2 ↔ 枚举 |
 | `entities` | 实体类与建表 SQL 一致 |
 | `design-ddl` | **DESIGN §9 的 DDL 与生成器逐列一致**（带 8 类漂移的自检：缺列/类型/可空性/默认值/索引/多表/漏表） |
+| `admin-spa` | **后台 SPA 与服务端、文档三方一致**：端点集合 / 路径参数名 / 查询参数名 / 视图字段 / 权限 / 错误码（带 14 类漂移的自检） |
 | `samples` | Webhook 签名测试向量 |
 | `config-tmpl` | 配置模板与 `@ConfigurationProperties` 一致（缺项 / 拼错 / 默认值不一致） |
 | `mutate` | **变异测试**：验证建表校验器真的能抓到错误 |
@@ -98,6 +101,18 @@ uv run --with protobuf --with pyyaml --with sqlglot --with pymysql \
 
 不加 `--services` 时脚本会明确打印「跳过了 N 项需要外部服务的检查」——
 而不是让读者以为绿色代表全都验过了。
+
+后台 SPA（`web/admin`）的 Node 侧检查（类型检查含 `.vue` 模板 / 单元测试 /
+生产构建）单独一组，用 `--web` 打开（需先 `cd web/admin && npm install`）：
+
+```bash
+uv run --with protobuf --with pyyaml --with sqlglot python tools/verify_all.py --web
+```
+
+它跑的是 `vue-tsc --noEmit`、`vitest run`、`vite build` 三条 npm 脚本。
+后台 SPA 还另有一层**真实服务端**集成测试（`web/admin/tests/live/`），
+那需要先起一个 `tm-admin.jar`，所以不在这个入口里——见
+[web/admin/README.md](web/admin/README.md)。
 
 ### 建表 SQL 为什么是生成的
 
@@ -646,6 +661,35 @@ WebP 是**半支持**，且这件事是明说的：当前 JDK 的 ImageIO 没有
 停用立刻踢会话、删帖级联、审计可查）+ `mutate_admin_api.py`（6 个变异，包括「删掉权限判断」
 与「停用时不删会话」，全部被捕获）。
 
+### 后台界面（M9）：64 位 id 在浏览器里被改写了
+
+后台的界面是 `web/admin`（Vue 3 + Element Plus），消费 `/v1/admin/**`，
+接口契约写在 [接入文档 §管理后台 API](docs/integration/08-admin-api.md)。
+它不阻塞后端验收，但有一个理由必须现在做：**前端的错误全是静默的**——
+路径拼错会回 `40400`（与「资源不存在」共用一个码），参数名拼错会被服务端忽略
+（界面显示「已筛选 Agent」，拿到的其实是全部人），字段名拼错只表现为某个单元格空白。
+三种都不报错、不红、类型检查也过。所以后台前端有两层机器校验：
+`tools/verify_admin_spa.py`（Java ↔ 文档 ↔ 前端源码，带 14 类注入漂移的自检）、
+以及 `web/admin/tests/live/`（驱动**线上那段客户端代码**打真实 `tm-admin.jar`）。
+
+第二层第一次跑就拓出一个**只有真实服务端才会暴露的缺陷**：
+
+| 缺陷 | 症状 | 根因 |
+|---|---|---|
+| 64 位 id 在 JS 里被改写 | 详情页/封禁/审计筛选全部「目标不存在」（`40401` / `40400`） | 主键是 Snowflake（18–19 位），而 JS 的 `number` 只精确到 2^53。真机上 `362810375490994176` 被 `JSON.parse` 读成 `362810375490994180`；类型检查看不见（两边都是 `number`），用小数字的单元测试也看不见 |
+
+修法不是「改服务端把 id 序列化成字符串」（那会改动用户端已在用的契约），
+而是在客户端保真解析：`web/admin/src/api/json.ts` 在解析前把整数形式的超长数字字面量
+加引号，于是 id 在 TS 里是字符串（`BigId`）；审计筛选的两个 id 输入框也从
+`el-input-number` 换成了普通文本输入——数字控件的值就是 JS number，一进控件就已经错了。
+`tests/unit/json.test.ts` 用真机上那个数字把这条不变量钉住。
+
+验证：`web/admin` 的 **39 个单元测试**（信封/错误码/URL 拼装/游标翻页/大整数保真）、
+`vue-tsc --noEmit`（含 `.vue` 模板）、`vite build`，以及 **20 个真实服务端集成测试**
+（登录失败 40101、OPS 读不到账号管理 40302、封禁后会话立刻失效、审计可查、
+64 位 id 原样发回仍能查到同一行）。前者用 `verify_all.py --web` 跑，
+后者需要先起一个 `tm-admin.jar`（步骤见 `web/admin/README.md`）。
+
 ### 断点续传读取（M3）：`CMD_SYNC` 怎么落地
 
 协议冻结之后剩下的就是那条「按 `(conv_id, since_seq)` 分页拉消息」的路径（DESIGN §10.2）。
@@ -749,8 +793,8 @@ S→C  payload = SyncResponse    // 「给你补消息」
 其中 6 条需要真实 Redis，跑在 `verify_all --services` 里）。
 
 REST 侧已做完「能登录」「能开会话、发消息、翻历史、管成员、收发图片」「加好友」
-「Agent 管理」「广场（信息流 / 点赞 / 评论）」（见 README 的「账号与令牌」「会话与消息」
-「好友」「图片」「Agent」「广场」六节），
+「Agent 管理」「广场（信息流 / 点赞 / 评论）」「管理后台（含界面）」（见 README 的「账号与令牌」
+「会话与消息」「好友」「图片」「Agent」「广场」「管理后台」七节），
 还没做的是：§2.2–§2.4 的几个读接口与改资料、Agent 的 Webhook 主动投递、
 大 V 的读扩散（见「广场」一节的欠账），
 以及用户端 Vue 脚手架（M3 验收标准的最后一步）。

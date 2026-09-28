@@ -1228,8 +1228,8 @@ tm_im/
 │   ├─ tm-app/                      # ★ 用户应用 boot（含 H5 静态资源）→ tm-app.jar
 │   └─ tm-admin/                    # ★ 后台应用 boot（含后台静态资源）→ tm-admin.jar
 ├─ web/
-│   ├─ h5/                          # 用户端 Vue 3
-│   └─ admin/                       # 管理后台 Vue 3
+│   ├─ h5/                          # 用户端 Vue 3（尚未创建）
+│   └─ admin/                       # 管理后台 Vue 3（M9 已建，M10 打包）
 ├─ sdk/
 │   ├─ python/tm_im_agent/
 │   └─ ts/agent-sdk/
@@ -1385,15 +1385,16 @@ M9 的验收标准是「可封禁、可查日志」。它拆成三半：**领域
 | 独立 JAR / 不依赖用户端身份体系 | 已实现 | `AdminHttpIT#applicationStarts`（不配 `TM_JWT_SECRET` 也能起——`jwtTokenService` 在 `CoreConfiguration` 里是 `@Lazy`） |
 | HTTP 层契约（信封、错误码、分页字段、时间格式） | 已实现 | `AdminApiContractTest`（18 用例，standalone MockMvc + 真实 `AdminService`） |
 | `40909 admin username exists` | 已实现 | `verify_error_codes.py`（54/54）+ `docs/integration/07-errors-limits.md` §2.3 |
-| 后台 Vue SPA（`web/admin`） | **未实现** | 与本轮用户端 Vue 脚手架同一笔欠账（§14.1 末行）：接口已就绪，界面在 M10 打包那一步一起做 |
+| 后台 Vue SPA（`web/admin`） | 已实现 | 四个工作面（参与者 / 内容审核 / 审计日志 / 后台账号）+ 两条机器校验：`tools/verify_admin_spa.py`（Java ↔ 08-admin-api.md ↔ 前端源码，带 14 类注入漂移的自检）与 `web/admin/tests/live/`（20 用例，驱动**线上那段客户端代码**打真实 tm-admin.jar）。另有 39 个单元测试 + `vue-tsc --noEmit` + `vite build`（`verify_all.py --web`）。接口的完整契约见 `docs/integration/08-admin-api.md` |
 | 审计归档 / 清理策略 | **未实现（有意）** | 审计表只写不删。清理属于 DBA 的归档动作，不应是一个 HTTP 接口（能被改动的审计只能证明「当时大概是这么回事」） |
 
-M9 同样是「先写错的版本会被测试打回」的一轮，两个缺陷都不是编译错误：
+M9 同样是「先写错的版本会被测试打回」的一轮，三个缺陷都不是编译错误：
 
 | 缺陷 | 症状 | 根因 |
 |---|---|---|
 | 登录失败不计数、锁定永不触发 | 错误码一个不少，用例全绿 | `@Transactional` 默认对运行时异常回滚，把「失败计数 + 失败审计」一起回滚掉了——`noRollbackFor = TmException.class` 不是可选参数 |
 | OPS 读不到「我是谁」（403 而不是 200） | 前端无法隐藏它没有权限的入口，而报错看起来像权限配置错了 | `/v1/admin/me` 最初复用了 SUPER only 的 `getAdmin`；它必须走不做分级的那条路径（`currentAdmin`） |
+| 64 位 id 在浏览器里被改写 | 详情页、封禁、审计筛选全部「目标不存在」（`40401` / `40400`） | 主键是 Snowflake（18–19 位），而 JS 的 `number` 只精确到 2^53：真机上 `362810375490994176` 被 `JSON.parse` 读成 `362810375490994180`。类型检查看不见（两边都是 `number`），用小数字的单元测试也看不见——拓出它的是驱动真实服务的 `web/admin/tests/live/` |
 
 ---
 

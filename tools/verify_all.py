@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import argparse
 import os
+import shutil
 import subprocess
 import sys
 import time
@@ -36,6 +37,12 @@ CHECKS = [
     # 这一轮就查出 friendship 少了四列、actor_secret 的主键写成了单列。
     # 而它是新人与未来的自己读模型的第一入口。
     ("design-ddl", "verify_design_ddl.py",      "DESIGN §9 的 DDL 与生成器逐列一致", "", []),
+    # 后台前端的三方一致性：Java 控制器/记录 ↔ 08-admin-api.md ↔ web/admin 的
+    # endpoints.ts / types.ts / admin.ts / errors.ts。前端拼错端点、参数名、字段名的
+    # 后果全是静默的（40400 看起来像「数据没了」，筛错的参数看起来像「没数据」），
+    # 而它们在 npm run build 与单元测试里都看不见。
+    ("admin-spa", "verify_admin_spa.py",
+     "后台 SPA 的端点/字段/错误码与 Java、文档三方一致", "", []),
     ("samples",  "verify_doc_samples.py",       "Webhook 签名测试向量",         "", []),
     # 模板是「运维视角的权威文档」，而代码才是默认值的真正来源。
     # 两者之间没有任何编译期约束，缺项的表现是「运维照模板配完，服务用的是代码默认值」——
@@ -63,7 +70,17 @@ CHECKS = [
     ("mutate-sync", "mutate_sync_read_path.py", "变异测试：续传读取路径的 10 条规则都有测试钉住", "", []),
 ]
 
-# 需要外部服务（真实 MySQL/Redis）的检查。
+# 需要 Node（web/admin 的依赖已安装）的检查。单独一组：它们与上面那些
+# 纯 Python 检查不是同一个前提——“没装 node_modules”与“代码有问题”必须能区分开。
+# 后台 SPA 的**真实服务端**集成测试（tests/live/）不在这里：它要求一个正在运行的
+# tm-admin.jar，那是 M9 验收时手跑的一步，见 web/admin/README.md。
+WEB_CHECKS = [
+    ("web-type", "vue-tsc --noEmit", "后台 SPA 的类型检查（含 .vue 模板）", ["run", "typecheck"]),
+    ("web-unit", "vitest run", "后台 SPA 的单元测试（vitest）", ["test"]),
+    ("web-build", "vite build", "后台 SPA 的生产构建（dist/）", ["run", "build"]),
+]
+
+USE_COLOR = sys.stdout.isatty()
 # 单独一组而不是混进 CHECKS：它们在没有凭据的机器上必然失败，
 # 而「因为环境缺失而变红」与「因为代码有问题而变红」必须能区分开。
 SERVICE_CHECKS = [
@@ -121,11 +138,43 @@ def run_one(name: str, script: str, desc: str, pkg: str,
     return r.returncode == 0, dt, out
 
 
+def run_web_one(name: str, label: str, npm_args: list[str]) -> tuple[bool, float, str]:
+    """跑 web/admin 的一条 npm 脚本。
+
+    先检查 node_modules：没有依赖时报“先 npm install”比报一堆
+    `Cannot find module 'vitest'` 有用得多，而后者容易被当成代码坏了。
+    """
+    workdir = REPO / "web" / "admin"
+    if not (workdir / "node_modules").is_dir():
+        return False, 0.0, (f"{workdir} 下没有 node_modules：先执行 `npm install`"
+                            "（后台 SPA 需要 Node 22 + npm，见 DESIGN 的环境表）")
+    npm = shutil.which("npm")
+    if npm is None:
+        return False, 0.0, "PATH 里找不到 npm（后台 SPA 需要 Node 22 + npm）"
+    return run_cmd(name, [npm, *npm_args], workdir)
+
+
+def run_cmd(name: str, cmd: list[str], cwd: Path,
+            timeout: int = 900) -> tuple[bool, float, str]:
+    t0 = time.perf_counter()
+    try:
+        r = subprocess.run(cmd, cwd=cwd, capture_output=True, timeout=timeout,
+                           env={**os.environ, "PYTHONIOENCODING": "utf-8"})
+    except subprocess.TimeoutExpired:
+        return False, time.perf_counter() - t0, f"超时（>{timeout}s）"
+    dt = time.perf_counter() - t0
+    out = (r.stdout or b"").decode("utf-8", "replace") + \
+          (r.stderr or b"").decode("utf-8", "replace")
+    return r.returncode == 0, dt, out
+
+
 def main() -> int:
     ap = argparse.ArgumentParser(description="tm_im 全量自检")
     ap.add_argument("--quick", action="store_true", help="跳过长耗时项")
     ap.add_argument("--services", action="store_true",
                     help="额外跑需要外部 MySQL/Redis 的检查（需 deploy/conf/local-conn.env）")
+    ap.add_argument("--web", action="store_true",
+                    help="额外跑后台 SPA 的 Node 侧检查（需 web/admin 已 npm install）")
     ap.add_argument("-v", "--verbose", action="store_true", help="失败时打印完整输出")
     args = ap.parse_args()
 
@@ -141,6 +190,9 @@ def main() -> int:
         # 明确说出「哪些没验证」，而不是让读者以为绿色代表全都验过了
         print(DIM(f"  跳过 {len(SERVICE_CHECKS)} 项需要外部服务的检查"
                   f"（--services 启用：{'、'.join(c[0] for c in SERVICE_CHECKS)}）"))
+    if not args.web:
+        print(DIM(f"  跳过 {len(WEB_CHECKS)} 项 Node 侧检查"
+                  f"（--web 启用：{'、'.join(c[0] for c in WEB_CHECKS)}）"))
     print()
 
     results = []
@@ -151,6 +203,16 @@ def main() -> int:
         results.append((name, script, desc, okk, dt, out))
         status = OK(" OK ") if okk else BAD("FAIL")
         print(f"  [{status}] {name:<10} {desc:<32} {DIM(f'{dt:5.1f}s')}")
+
+    if args.web:
+        print()
+        for name, _bin, label, npm_args in WEB_CHECKS:
+            if sys.stdout.isatty():
+                print(f"  {DIM('...')} {name:<10} {label}", end="\r")
+            okk, dt, out = run_web_one(name, label, npm_args)
+            results.append((name, "(npm) " + label, label, okk, dt, out))
+            status = OK(" OK ") if okk else BAD("FAIL")
+            print(f"  [{status}] {name:<10} {label:<32} {DIM(f'{dt:5.1f}s')}")
 
     print()
     print("=" * 74)

@@ -46,6 +46,7 @@
 | [05-webhook.md](05-webhook.md) | Webhook 事件、HMAC 签名校验、重试 | 路径 B |
 | [06-no-sdk-guide.md](06-no-sdk-guide.md) | **零依赖裸实现**（Python/Node/Go 原生） | 不想装任何库时 |
 | [07-errors-limits.md](07-errors-limits.md) | 错误码表、限流、重试策略 | 联调排错 |
+| [08-admin-api.md](08-admin-api.md) | 管理后台 `/v1/admin` 的完整契约（另一个 JAR、另一套凭证） | 做后台界面 / 运营 |
 
 ---
 
@@ -56,8 +57,12 @@
 | REST API | `https://<host>:8080/v1` | HTTPS / JSON |
 | 长连接 | `wss://<host>:8090/ws`（浏览器）<br/>`<host>:8090`（原生 TCP） | WebSocket / TCP + Protobuf |
 | 图片上传下载 | `https://<host>:8080/v1/media` | HTTPS / multipart |
+| **管理后台 API** | `https://<host>:8081/v1/admin` | HTTPS / JSON（**另一个 JAR**，见 [08-admin-api.md](08-admin-api.md)） |
 
 > 开发环境常用 `http://localhost:8080` 与 `ws://localhost:8090/ws`。生产必须 HTTPS/WSS。
+>
+> 管理后台是独立的第二个应用（`tm-admin.jar`、默认 :8081），本文档剩下的部分
+> 只讲用户端与 Agent 共用的那一套 REST；后台的契约单独一篇。
 
 ---
 
